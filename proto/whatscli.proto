@@ -1,0 +1,315 @@
+syntax = "proto3";
+
+package whatscli;
+
+option go_package = "github.com/antong314/whatscli-rs/backend/gen/pb";
+
+service WhatsCLI {
+  // Bidirectional event stream. The first ClientMessage MUST be a
+  // ConnectHandshake; the server rejects the stream otherwise.
+  rpc EventStream(stream ClientMessage) returns (stream ServerEvent);
+
+  // Stream media bytes for a given message. Separated from Connect to avoid
+  // blocking the main event stream with large payloads.
+  rpc GetMedia(MediaRequest) returns (stream MediaChunk);
+
+  // QR-code login flow. Server streams QR updates until the device is paired
+  // or the timeout expires.
+  rpc Login(LoginRequest) returns (stream LoginEvent);
+}
+
+// ---------------------------------------------------------------------------
+// Client -> Server
+// ---------------------------------------------------------------------------
+
+message ClientMessage {
+  oneof msg {
+    ConnectHandshake handshake = 1;
+
+    SelectChat select_chat = 2;
+    RequestBacklog request_backlog = 3;
+
+    SendText send_text = 4;
+    SendMedia send_media = 5;
+
+    MarkRead mark_read = 6;
+    MarkUnread mark_unread = 7;
+
+    LoginRequest login = 8;
+    DisconnectRequest disconnect = 9;
+    LogoutRequest logout = 10;
+
+    DownloadMedia download_media = 11;
+    OpenMedia open_media = 12;
+
+    RevokeMessage revoke = 13;
+    LeaveGroup leave_group = 14;
+    CreateGroup create_group = 15;
+    GroupMember group_member = 16;
+    SetSubject set_subject = 17;
+
+    GetInfo get_info = 18;
+    GetUrl get_url = 19;
+
+    ShowMedia show_media = 20;
+    SendImageCommand send_image = 21;
+    SendVideoCommand send_video = 22;
+    SendAudioCommand send_audio = 23;
+  }
+}
+
+// First message on the Connect stream — client metadata, not a user action.
+// Also re-sent on terminal resize.
+message ConnectHandshake {
+  int32 viewport_rows = 1;
+  int32 viewport_cols = 2;
+  string client_version = 3;
+}
+
+message SelectChat {
+  string chat_id = 1;
+}
+
+message RequestBacklog {}
+
+message SendText {
+  string chat_id = 1;
+  string text = 2;
+}
+
+message SendMedia {
+  string chat_id = 1;
+  string file_path = 2;
+  MessageKind kind = 3;
+}
+
+message MarkRead {
+  string chat_id = 1;
+}
+
+message MarkUnread {
+  string chat_id = 1;
+}
+
+message LoginRequest {}
+
+message DisconnectRequest {}
+
+message LogoutRequest {}
+
+message DownloadMedia {
+  string message_id = 1;
+}
+
+message OpenMedia {
+  string message_id = 1;
+}
+
+message ShowMedia {
+  string message_id = 1;
+}
+
+message RevokeMessage {
+  string message_id = 1;
+}
+
+message LeaveGroup {}
+
+message CreateGroup {
+  string subject = 1;
+  repeated string participants = 2;
+}
+
+message GroupMember {
+  enum Action {
+    ADD = 0;
+    REMOVE = 1;
+    PROMOTE = 2;
+    DEMOTE = 3;
+  }
+  Action action = 1;
+  repeated string participants = 2;
+}
+
+message SetSubject {
+  string subject = 1;
+}
+
+message GetInfo {
+  string message_id = 1;
+}
+
+message GetUrl {
+  string message_id = 1;
+}
+
+message SendImageCommand {
+  string file_path = 1;
+}
+
+message SendVideoCommand {
+  string file_path = 1;
+}
+
+message SendAudioCommand {
+  string file_path = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Server -> Client
+// ---------------------------------------------------------------------------
+
+message ServerEvent {
+  oneof event {
+    ChatList chat_list = 1;
+    ChatMessages chat_messages = 2;
+    NewMessage new_message = 3;
+    NewTranslation new_translation = 4;
+    NewTranscription new_transcription = 5;
+    StatusUpdate status_update = 6;
+    ErrorEvent error_event = 7;
+    InfoText info_text = 8;
+    FileReady file_ready = 9;
+    OpenFileRequest open_file = 10;
+    ModelProgress model_progress = 11;
+    ColorList color_list = 12;
+  }
+}
+
+message ChatList {
+  repeated ChatProto chats = 1;
+}
+
+message ChatMessages {
+  string chat_id = 1;
+  repeated MessageProto messages = 2;
+}
+
+message NewMessage {
+  MessageProto message = 1;
+}
+
+message NewTranslation {
+  string message_id = 1;
+  string translated_text = 2;
+}
+
+message NewTranscription {
+  string message_id = 1;
+  string transcribed_text = 2;
+}
+
+message StatusUpdate {
+  int32 battery_charge = 1;
+  bool battery_loading = 2;
+  bool battery_powersave = 3;
+  bool connected = 4;
+  string last_seen = 5;
+}
+
+message ErrorEvent {
+  string text = 1;
+}
+
+message InfoText {
+  string text = 1;
+}
+
+message FileReady {
+  string message_id = 1;
+  string file_path = 2;
+}
+
+message OpenFileRequest {
+  string file_path = 1;
+}
+
+message ModelProgress {
+  string model_name = 1;
+  int64 downloaded_bytes = 2;
+  int64 total_bytes = 3;
+}
+
+message ColorList {
+  repeated string colors = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Media streaming
+// ---------------------------------------------------------------------------
+
+message MediaRequest {
+  string message_id = 1;
+}
+
+message MediaChunk {
+  bytes data = 1;
+  string mime_type = 2;
+  int64 total_size = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Login flow
+// ---------------------------------------------------------------------------
+
+message LoginEvent {
+  oneof event {
+    QrCode qr_code = 1;
+    LoginSuccess success = 2;
+    LoginTimeout timeout = 3;
+    LoginError error = 4;
+  }
+}
+
+message QrCode {
+  bytes png_data = 1;
+  string text = 2;
+}
+
+message LoginSuccess {}
+
+message LoginTimeout {}
+
+message LoginError {
+  string message = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Core data types
+// ---------------------------------------------------------------------------
+
+enum MessageKind {
+  TEXT = 0;
+  IMAGE = 1;
+  VIDEO = 2;
+  AUDIO = 3;
+  DOCUMENT = 4;
+  UNKNOWN = 5;
+}
+
+message ChatProto {
+  string id = 1;
+  bool is_group = 2;
+  string name = 3;
+  int32 unread = 4;
+  int64 last_message = 5;
+  bool archived = 6;
+  bool pinned = 7;
+}
+
+message MessageProto {
+  string id = 1;
+  string chat_id = 2;
+  string sender_id = 3;
+  string contact_id = 4;
+  string contact_name = 5;
+  string contact_short = 6;
+  uint64 timestamp = 7;
+  bool from_me = 8;
+  bool forwarded = 9;
+  string text = 10;
+  MessageKind kind = 11;
+  string mime_type = 12;
+  string file_name = 13;
+  bool unread = 14;
+}

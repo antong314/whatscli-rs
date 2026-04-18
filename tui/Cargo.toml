@@ -1,0 +1,29 @@
+[package]
+name = "whatscli-tui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+ratatui = { version = "0.30", features = ["crossterm"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui-image = "10"
+image = "0.25"
+color-eyre = "0.6"
+arboard = "3"
+notify-rust = "4"
+dirs = "6"
+futures = "0.3"
+tower = "0.4"
+async-stream = "0.3"
+hyper-util = { version = "0.1", features = ["tokio"] }
+libc = "0.2"
+
+[dev-dependencies]
+insta = "1"
+tokio-test = "0.4"
+
+[build-dependencies]
+tonic-build = "0.12"

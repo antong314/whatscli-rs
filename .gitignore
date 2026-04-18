@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Backend (Go)
+backend/whatscli
+backend/whatscli-server
+backend/whatscli.exe
+backend/_llama-go
+backend/_whisper
+backend/_opus
+
+# TUI (Rust)
+tui/target/
+
+# Editor / tooling
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local agent / scratch files
+.codex
+.cursor/
