@@ -212,29 +212,54 @@ fn wrap_message<'a>(
     if width == 0 {
         return;
     }
-    let first_line_avail = width.saturating_sub(prefix.len());
+    let prefix_style = Style::default()
+        .fg(sender_color)
+        .add_modifier(Modifier::BOLD);
+    let pad = " ".repeat(indent);
 
-    let chars: Vec<char> = text.chars().collect();
+    // Honor embedded newlines: each \n in the message becomes its own logical
+    // paragraph, and each paragraph is then word-wrapped to the available width.
+    // Only the very first segment carries the sender prefix; subsequent segments
+    // are indented to align under the text portion.
+    for (segment_idx, segment) in text.split('\n').enumerate() {
+        if segment_idx == 0 {
+            wrap_segment_with_prefix(
+                lines,
+                prefix,
+                prefix_style,
+                segment,
+                width,
+                &pad,
+                indent,
+            );
+        } else {
+            wrap_segment_indented(lines, segment, width, &pad, indent);
+        }
+    }
+}
+
+fn wrap_segment_with_prefix<'a>(
+    lines: &mut Vec<Line<'a>>,
+    prefix: &str,
+    prefix_style: Style,
+    segment: &str,
+    width: usize,
+    pad: &str,
+    indent: usize,
+) {
+    let first_line_avail = width.saturating_sub(prefix.chars().count());
+    let chars: Vec<char> = segment.chars().collect();
+
     if chars.len() <= first_line_avail {
         lines.push(Line::from(vec![
-            Span::styled(
-                prefix.to_string(),
-                Style::default()
-                    .fg(sender_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(text.to_string()),
+            Span::styled(prefix.to_string(), prefix_style),
+            Span::raw(segment.to_string()),
         ]));
         return;
     }
 
     lines.push(Line::from(vec![
-        Span::styled(
-            prefix.to_string(),
-            Style::default()
-                .fg(sender_color)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(prefix.to_string(), prefix_style),
         Span::raw(chars[..first_line_avail].iter().collect::<String>()),
     ]));
 
@@ -245,17 +270,51 @@ fn wrap_message<'a>(
     let mut pos = first_line_avail;
     while pos < chars.len() {
         let end = (pos + continuation_avail).min(chars.len());
-        let pad = " ".repeat(indent);
-        lines.push(Line::from(Span::raw(
-            format!("{}{}", pad, chars[pos..end].iter().collect::<String>()),
-        )));
+        lines.push(Line::from(Span::raw(format!(
+            "{}{}",
+            pad,
+            chars[pos..end].iter().collect::<String>()
+        ))));
+        pos = end;
+    }
+}
+
+fn wrap_segment_indented<'a>(
+    lines: &mut Vec<Line<'a>>,
+    segment: &str,
+    width: usize,
+    pad: &str,
+    indent: usize,
+) {
+    let avail = width.saturating_sub(indent);
+    let chars: Vec<char> = segment.chars().collect();
+
+    if chars.is_empty() {
+        // Preserve blank lines authored by the sender (e.g. paragraph breaks).
+        lines.push(Line::from(pad.to_string()));
+        return;
+    }
+
+    if avail == 0 {
+        return;
+    }
+
+    let mut pos = 0;
+    while pos < chars.len() {
+        let end = (pos + avail).min(chars.len());
+        lines.push(Line::from(Span::raw(format!(
+            "{}{}",
+            pad,
+            chars[pos..end].iter().collect::<String>()
+        ))));
         pos = end;
     }
 }
 
 /// Wrap an annotation line (transcription / translation) with a single style
 /// applied to the whole line. Continuation lines are indented under the text
-/// portion so they align with the first character after the label.
+/// portion so they align with the first character after the label. Embedded
+/// newlines in `text` are preserved as line breaks.
 fn wrap_styled<'a>(
     lines: &mut Vec<Line<'a>>,
     prefix: &str,
@@ -267,35 +326,47 @@ fn wrap_styled<'a>(
         return;
     }
     let indent = prefix.chars().count();
-    let first_line_avail = width.saturating_sub(indent);
-    let chars: Vec<char> = text.chars().collect();
-
-    if chars.len() <= first_line_avail {
-        lines.push(Line::from(Span::styled(
-            format!("{}{}", prefix, text),
-            style,
-        )));
-        return;
-    }
-
-    lines.push(Line::from(Span::styled(
-        format!("{}{}", prefix, chars[..first_line_avail].iter().collect::<String>()),
-        style,
-    )));
-
-    let continuation_avail = width.saturating_sub(indent);
-    if continuation_avail == 0 {
-        return;
-    }
     let pad = " ".repeat(indent);
-    let mut pos = first_line_avail;
-    while pos < chars.len() {
-        let end = (pos + continuation_avail).min(chars.len());
-        lines.push(Line::from(Span::styled(
-            format!("{}{}", pad, chars[pos..end].iter().collect::<String>()),
-            style,
-        )));
-        pos = end;
+    let avail = width.saturating_sub(indent);
+
+    for (segment_idx, segment) in text.split('\n').enumerate() {
+        let chars: Vec<char> = segment.chars().collect();
+        let (line_pad, is_first) = if segment_idx == 0 {
+            (prefix.to_string(), true)
+        } else {
+            (pad.clone(), false)
+        };
+
+        if chars.is_empty() {
+            // Blank segment from a literal "\n\n": preserve it (use prefix on the
+            // first segment, indented blank otherwise).
+            lines.push(Line::from(Span::styled(line_pad, style)));
+            continue;
+        }
+
+        if avail == 0 {
+            return;
+        }
+
+        // First segment: first chunk includes the prefix; later chunks use pad.
+        // Subsequent segments: every chunk uses pad.
+        let mut pos = 0;
+        let mut chunk_idx = 0;
+        while pos < chars.len() {
+            let end = (pos + avail).min(chars.len());
+            let chunk: String = chars[pos..end].iter().collect();
+            let leader = if is_first && chunk_idx == 0 {
+                prefix.to_string()
+            } else {
+                pad.clone()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{}{}", leader, chunk),
+                style,
+            )));
+            pos = end;
+            chunk_idx += 1;
+        }
     }
 }
 

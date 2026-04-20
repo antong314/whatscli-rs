@@ -222,3 +222,61 @@ fn test_long_message_wraps() {
     let alice_lines: Vec<&str> = output.lines().filter(|l| l.contains('A')).collect();
     assert!(alice_lines.len() > 1, "long message should wrap to multiple lines");
 }
+
+#[test]
+fn test_multiline_message_preserves_newlines() {
+    // Reproduces the user-reported bug: a message authored with embedded
+    // newlines (e.g. via Shift+Enter in the composer) was rendered as a single
+    // line in the chat view because the wrap logic ignored '\n'.
+    let mut app = setup_app();
+    app.current_chat = Some("chat1".to_string());
+    app.messages = vec![
+        make_message(
+            "m1",
+            "this is only\na test of a multi-line\nmessage",
+            true,
+            "Me",
+        ),
+    ];
+    app.scroll_offset = usize::MAX;
+
+    let output = render_to_string(&mut app, 100, 20);
+
+    // Each segment must appear on its own visible line. The first segment is
+    // co-located with the "Me: " sender prefix, the others are indented.
+    let me_line = output
+        .lines()
+        .find(|l| l.contains("Me:") && l.contains("this is only"))
+        .expect("first segment should be on the prefix line");
+    let second_line = output
+        .lines()
+        .find(|l| l.contains("a test of a multi-line"))
+        .expect("second segment should be on its own line");
+    let third_line = output
+        .lines()
+        .find(|l| {
+            // Skip the sender-prefix line that already contains "this is only".
+            l.contains("message")
+                && !l.contains("Me:")
+                && !l.contains("this is only")
+                && !l.contains("a test")
+        })
+        .expect("third segment should be on its own line");
+
+    // None of the segments should be smushed together by stripped newlines.
+    assert!(
+        !me_line.contains("a test of a multi-line"),
+        "first and second segments must not collapse onto one line, got: {:?}",
+        me_line
+    );
+    assert!(
+        !second_line.contains("message"),
+        "second and third segments must not collapse onto one line, got: {:?}",
+        second_line
+    );
+    assert!(
+        third_line.contains("message"),
+        "expected the third segment line to contain 'message', got: {:?}",
+        third_line
+    );
+}

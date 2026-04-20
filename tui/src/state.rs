@@ -1,7 +1,16 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
+use ratatui::style::{Color, Style};
+use ratatui::widgets::{Block, Borders};
+use tui_textarea::{TextArea, WrapMode};
+
 use crate::proto::whatscli::{self as pb, ChatProto, ClientMessage, MessageProto, ServerEvent};
+
+/// Maximum visible rows the composer can grow to before it starts scrolling
+/// internally. Matches Slack-style behavior (1 row min, 5 rows max).
+pub const COMPOSER_MIN_ROWS: u16 = 3; // 1 line of text + top/bottom border = 3
+pub const COMPOSER_MAX_ROWS: u16 = 7; // 5 lines of text + top/bottom border = 7
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FocusPane {
@@ -54,6 +63,10 @@ pub struct App {
     pub follow_tail: bool,
     pub chat_list_index: usize,
 
+    /// Multi-line message composer for the Normal input mode. Owns its own
+    /// cursor and supports readline-style editing via `tui-textarea`.
+    pub composer: TextArea<'static>,
+    /// Single-line buffer used by the modal Command (`/foo`) and Search modes.
     pub input_buffer: String,
     pub input_mode: InputMode,
 
@@ -92,6 +105,7 @@ impl Default for App {
             scroll_offset: 0,
             follow_tail: true,
             chat_list_index: 0,
+            composer: build_composer(),
             input_buffer: String::new(),
             input_mode: InputMode::Normal,
             show_archived: false,
@@ -108,9 +122,37 @@ impl Default for App {
     }
 }
 
+/// Build a fresh composer with the styling and growth limits we want.
+fn build_composer() -> TextArea<'static> {
+    let mut ta = TextArea::default();
+    ta.set_block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Input ")
+            .border_style(Style::default().fg(Color::Blue)),
+    );
+    ta.set_style(Style::default().fg(Color::White));
+    // Don't visually highlight the cursor's line; we only care about the cursor.
+    ta.set_cursor_line_style(Style::default());
+    ta.set_wrap_mode(WrapMode::WordOrGlyph);
+    ta.set_min_rows(COMPOSER_MIN_ROWS);
+    ta.set_max_rows(COMPOSER_MAX_ROWS);
+    ta
+}
+
 impl App {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns the composer's current contents joined by newlines.
+    pub fn composer_text(&self) -> String {
+        self.composer.lines().join("\n")
+    }
+
+    /// Reset the composer back to an empty state, preserving its styling.
+    pub fn composer_reset(&mut self) {
+        self.composer = build_composer();
     }
 
     pub fn focus_next(&mut self) {

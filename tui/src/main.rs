@@ -2,7 +2,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use color_eyre::Result;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 
@@ -101,8 +104,23 @@ async fn main() -> Result<()> {
 
     let mut terminal = ratatui::init();
 
+    // Try to enable the kitty keyboard protocol so we can distinguish
+    // Shift+Enter (newline in composer) from plain Enter (send). Terminals that
+    // don't support it just ignore the escape sequence.
+    let kbd_enhanced = crossterm::execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        )
+    )
+    .is_ok();
+
     let result = run_app(&mut terminal, &mut app, client_handle.as_ref(), &mut grpc_rx).await;
 
+    if kbd_enhanced {
+        let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
     ratatui::restore();
     result
 }
@@ -200,7 +218,15 @@ fn request_visible_images(
 
 fn handle_terminal_event(app: &mut App, evt: Event) -> Option<ClientMessage> {
     match evt {
-        Event::Key(key) => handle_key(app, key),
+        Event::Key(key) => {
+            // With kitty keyboard protocol enabled we also get Repeat and
+            // Release events. Only react to Press to keep behavior consistent
+            // with terminals that don't report event types.
+            if !matches!(key.kind, KeyEventKind::Press) {
+                return None;
+            }
+            handle_key(app, key)
+        }
         Event::Resize(cols, rows) => Some(ClientMessage {
             msg: Some(pb::client_message::Msg::Handshake(pb::ConnectHandshake {
                 viewport_rows: rows as i32,
@@ -258,90 +284,72 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Option<ClientMessage> {
 }
 
 fn handle_normal_key(app: &mut App, key: event::KeyEvent) -> Option<ClientMessage> {
+    // App-level keys that are never forwarded to the composer.
     match key.code {
         KeyCode::Tab => {
             app.focus_next();
-            None
-        }
-        KeyCode::Up => {
-            if app.focus_is_chat_list() {
-                navigate_chat(app, -1);
-                select_current_chat(app)
-            } else {
-                app.scroll_up(1);
-                None
-            }
-        }
-        KeyCode::Down => {
-            if app.focus_is_chat_list() {
-                navigate_chat(app, 1);
-                select_current_chat(app)
-            } else {
-                app.scroll_down(1);
-                None
-            }
+            return None;
         }
         KeyCode::PageUp => {
             app.scroll_up(10);
-            None
+            return None;
         }
         KeyCode::PageDown => {
             app.scroll_down(10);
-            None
-        }
-        KeyCode::Enter => {
-            if app.focus_is_chat_list() {
-                if app.is_archived_folder_selected() {
-                    app.show_archived = !app.show_archived;
-                    return None;
-                }
-                select_current_chat(app)
-            } else if !app.input_buffer.is_empty() {
-                let text = std::mem::take(&mut app.input_buffer);
-                if text.starts_with('/') {
-                    return parse_command(app, &text[1..]);
-                }
-                if let Some(ref chat_id) = app.current_chat {
-                    return Some(ClientMessage {
-                        msg: Some(pb::client_message::Msg::SendText(pb::SendText {
-                            chat_id: chat_id.clone(),
-                            text,
-                        })),
-                    });
-                }
-                None
-            } else {
-                None
-            }
-        }
-        KeyCode::Char(c) => {
-            if c == '/' {
-                app.input_mode = InputMode::Command;
-                app.input_buffer.clear();
-            } else if app.focus_is_chat_list() {
-                app.chat_filter.push(c);
-                app.chat_list_index = 0;
-                return select_current_chat(app);
-            } else {
-                app.input_buffer.push(c);
-            }
-            None
-        }
-        KeyCode::Backspace => {
-            if app.focus_is_chat_list() && !app.chat_filter.is_empty() {
-                app.chat_filter.pop();
-                app.chat_list_index = 0;
-                return select_current_chat(app);
-            }
-            app.input_buffer.pop();
-            None
+            return None;
         }
         KeyCode::Esc => {
-            if app.input_mode != InputMode::Normal {
-                app.input_mode = InputMode::Normal;
-                app.input_buffer.clear();
-            } else if app.focus_is_chat_list() && !app.chat_filter.is_empty() {
+            if app.focus_is_chat_list() && !app.chat_filter.is_empty() {
                 app.chat_filter.clear();
+                app.chat_list_index = 0;
+                return select_current_chat(app);
+            }
+            return None;
+        }
+        _ => {}
+    }
+
+    // Chat-list-focused navigation and live filtering.
+    if app.focus_is_chat_list() {
+        return handle_chat_list_key(app, key);
+    }
+
+    // Messages-pane-focused: forward to the composer, with overrides.
+    handle_composer_key(app, key)
+}
+
+fn handle_chat_list_key(app: &mut App, key: event::KeyEvent) -> Option<ClientMessage> {
+    match key.code {
+        KeyCode::Up => {
+            navigate_chat(app, -1);
+            select_current_chat(app)
+        }
+        KeyCode::Down => {
+            navigate_chat(app, 1);
+            select_current_chat(app)
+        }
+        KeyCode::Enter => {
+            if app.is_archived_folder_selected() {
+                app.show_archived = !app.show_archived;
+                return None;
+            }
+            select_current_chat(app)
+        }
+        KeyCode::Char(c) => {
+            // Special case: `/` in an empty filter context jumps into Command mode
+            // (this matches the legacy whatscli behavior).
+            if c == '/' && app.chat_filter.is_empty() {
+                app.input_mode = InputMode::Command;
+                app.input_buffer.clear();
+                return None;
+            }
+            app.chat_filter.push(c);
+            app.chat_list_index = 0;
+            select_current_chat(app)
+        }
+        KeyCode::Backspace => {
+            if !app.chat_filter.is_empty() {
+                app.chat_filter.pop();
                 app.chat_list_index = 0;
                 return select_current_chat(app);
             }
@@ -349,6 +357,43 @@ fn handle_normal_key(app: &mut App, key: event::KeyEvent) -> Option<ClientMessag
         }
         _ => None,
     }
+}
+
+fn handle_composer_key(app: &mut App, key: event::KeyEvent) -> Option<ClientMessage> {
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    // Enter sends the message; Shift+Enter inserts a newline.
+    if let KeyCode::Enter = key.code {
+        if shift {
+            app.composer.insert_newline();
+            return None;
+        }
+        return send_composer(app);
+    }
+
+    // Forward everything else to the textarea, which handles arrows, Home/End,
+    // Ctrl+A/E, Ctrl+W (delete word), word jumps, Backspace/Delete, and printable
+    // chars. tui-textarea consumes a crossterm KeyEvent directly.
+    app.composer.input(key);
+    None
+}
+
+fn send_composer(app: &mut App) -> Option<ClientMessage> {
+    let text = app.composer_text();
+    if text.is_empty() {
+        return None;
+    }
+    let chat_id = app.current_chat.clone()?;
+    app.composer_reset();
+    if let Some(rest) = text.strip_prefix('/') {
+        return parse_command(app, rest);
+    }
+    Some(ClientMessage {
+        msg: Some(pb::client_message::Msg::SendText(pb::SendText {
+            chat_id,
+            text,
+        })),
+    })
 }
 
 fn handle_input_key(app: &mut App, key: event::KeyEvent) -> Option<ClientMessage> {

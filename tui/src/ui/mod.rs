@@ -9,17 +9,20 @@ use ratatui::{
     Frame,
 };
 
-use crate::state::App;
+use crate::state::{App, InputMode, COMPOSER_MAX_ROWS, COMPOSER_MIN_ROWS};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let total_area = f.area();
+    let input_height = compute_input_height(app, total_area.width);
+
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(5),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
         ])
-        .split(f.area());
+        .split(total_area);
 
     status_bar::render(f, outer[0], app);
 
@@ -39,4 +42,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     input_bar::render(f, outer[2], app);
+}
+
+/// Pick the input area height for this frame.
+///
+/// Modal Command/Search bars are always single-line (3 rows including borders).
+/// The composer auto-grows from `COMPOSER_MIN_ROWS` to `COMPOSER_MAX_ROWS` based
+/// on its content for the available width.
+fn compute_input_height(app: &mut App, width: u16) -> u16 {
+    match app.input_mode {
+        InputMode::Command | InputMode::Search => 3,
+        InputMode::Normal => {
+            let m = app.composer.measure(width);
+            m.preferred_rows.clamp(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS)
+        }
+    }
 }
