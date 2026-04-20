@@ -12,7 +12,7 @@ use ratatui::DefaultTerminal;
 use whatscli_tui::client;
 use whatscli_tui::media;
 use whatscli_tui::proto::whatscli::{self as pb, ClientMessage};
-use whatscli_tui::state::{App, ConnectionState, InputMode};
+use whatscli_tui::state::{App, ConnectionState, FocusPane, InputMode};
 use whatscli_tui::ui;
 
 fn socket_path() -> PathBuf {
@@ -333,7 +333,15 @@ fn handle_chat_list_key(app: &mut App, key: event::KeyEvent) -> Option<ClientMes
                 app.show_archived = !app.show_archived;
                 return None;
             }
-            select_current_chat(app)
+            let cmd = select_current_chat(app);
+            // Picking a chat means "I'm ready to read/reply": clear any active
+            // filter so a future Tab back to the list shows the full list, and
+            // shift focus to the composer so the next keystroke is text input
+            // rather than a filter character.
+            app.chat_filter.clear();
+            app.chat_list_index = 0;
+            app.focus = FocusPane::Messages;
+            cmd
         }
         KeyCode::Char(c) => {
             // Special case: `/` in an empty filter context jumps into Command mode
