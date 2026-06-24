@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gen2brain/beeep"
@@ -49,7 +50,32 @@ type SessionManager struct {
 	eventHandler    *eventHandler
 	Translator      *translate.Translator
 	Transcriber     *transcribe.Transcriber
+
+	// markReadDelay is how long the user must dwell on a chat before a PROBE
+	// selection is converted to an actual read receipt. Tunable for tests.
+	// COMMIT selections (Enter on a chat row) bypass this entirely.
+	markReadDelay time.Duration
+	// markReadMu guards markReadTimer / markReadTimerChat. Held only across
+	// short critical sections (timer create/stop and a single map lookup).
+	markReadMu sync.Mutex
+	// markReadTimer is the pending auto-mark-as-read timer scheduled by the
+	// most recent PROBE selection. Cancelled and replaced on every new
+	// setCurrentReceiver. nil when no timer is pending.
+	markReadTimer *time.Timer
+	// markReadTimerChat is the chat ID the pending timer would mark on fire;
+	// captured at schedule time so a late-arriving timer can no-op if the
+	// user has since moved on to a different chat.
+	markReadTimerChat string
+	// markReadFn is the function actually invoked to perform a mark-as-read.
+	// Defaults to sm.autoMarkRead in Init. Tests can swap this out to count
+	// invocations without standing up a real WhatsApp client.
+	markReadFn func(chatID string)
 }
+
+// DefaultMarkReadDelay is how long we wait after a user PROBE-selects a chat
+// (e.g. via Up/Down arrow) before marking it as read. Picked to be longer
+// than typical "scrolling past" but shorter than "I'm reading the messages".
+const DefaultMarkReadDelay = 3 * time.Second
 
 // StoreTranslation saves a translation for a message ID (thread-safe, persistent).
 func (sm *SessionManager) StoreTranslation(messageID, text string) {
@@ -97,6 +123,8 @@ func (sm *SessionManager) Init(handler UiMessageHandler) {
 	sm.ContactChannel = make(chan Contact, 10)
 	sm.TextChannel = make(chan *waProto.Message, 10)
 	sm.eventHandler = &eventHandler{sm: sm}
+	sm.markReadDelay = DefaultMarkReadDelay
+	sm.markReadFn = sm.autoMarkRead
 }
 
 // StartManager starts the receiver and message handling goroutine.
@@ -160,7 +188,7 @@ func (sm *SessionManager) runManager() error {
 	return nil
 }
 
-func (sm *SessionManager) setCurrentReceiver(id string) {
+func (sm *SessionManager) setCurrentReceiver(id string, intent SelectIntent) {
 	sm.currentReceiver = id
 	msgs := sm.getMessages(id)
 	sm.uiHandler.NewScreen(msgs)
@@ -175,7 +203,79 @@ func (sm *SessionManager) setCurrentReceiver(id string) {
 	sm.translateScreenMessages(tail)
 	sm.transcribeScreenMessages(tail)
 
-	go sm.autoMarkRead(id)
+	sm.scheduleAutoMarkRead(id, intent)
+}
+
+// scheduleAutoMarkRead arranges for `chatID` to be marked as read.
+//
+// On COMMIT (e.g. Enter on a chat row, /read, an explicit "I want this chat"
+// signal), the read receipt fires immediately.
+//
+// On PROBE (e.g. Up/Down arrow navigation through the chat list), we instead
+// start a short timer. If the user moves on to another chat before the timer
+// fires, the timer is cancelled and the previous chat stays unread. This
+// prevents arrowing past a queue of unread chats from blowing them all away.
+//
+// The state is guarded by markReadMu so concurrent selects from the network
+// goroutine and timer fires from the timer goroutine don't race.
+func (sm *SessionManager) scheduleAutoMarkRead(chatID string, intent SelectIntent) {
+	sm.markReadMu.Lock()
+	if sm.markReadTimer != nil {
+		sm.markReadTimer.Stop()
+		sm.markReadTimer = nil
+		sm.markReadTimerChat = ""
+	}
+
+	if intent == SelectIntentCommit {
+		fn := sm.markReadFn
+		sm.markReadMu.Unlock()
+		go fn(chatID)
+		return
+	}
+
+	delay := sm.markReadDelay
+	if delay <= 0 {
+		// Treat a zero/negative delay as "fire immediately". Useful for tests.
+		fn := sm.markReadFn
+		sm.markReadMu.Unlock()
+		go fn(chatID)
+		return
+	}
+
+	sm.markReadTimerChat = chatID
+	sm.markReadTimer = time.AfterFunc(delay, func() {
+		sm.markReadMu.Lock()
+		// Verify the user is STILL on this chat. Two ways this can fail:
+		//   1. setCurrentReceiver fired again before AfterFunc started, but
+		//      the Stop() lost the race - we'd see markReadTimerChat point
+		//      to a different chat (or be empty).
+		//   2. The user disconnected/reset.
+		// In either case we abort silently.
+		if sm.currentReceiver != chatID || sm.markReadTimerChat != chatID {
+			sm.markReadMu.Unlock()
+			return
+		}
+		sm.markReadTimer = nil
+		sm.markReadTimerChat = ""
+		fn := sm.markReadFn
+		sm.markReadMu.Unlock()
+		fn(chatID)
+	})
+	sm.markReadMu.Unlock()
+}
+
+// cancelPendingAutoMarkRead drops any in-flight PROBE timer without firing.
+// Called when the user explicitly marks a chat unread, so a stale timer
+// can't immediately undo the user's action by clearing the unread state
+// they just set.
+func (sm *SessionManager) cancelPendingAutoMarkRead() {
+	sm.markReadMu.Lock()
+	defer sm.markReadMu.Unlock()
+	if sm.markReadTimer != nil {
+		sm.markReadTimer.Stop()
+		sm.markReadTimer = nil
+		sm.markReadTimerChat = ""
+	}
 }
 
 // autoMarkRead marks the current chat as read both locally and on WhatsApp,
@@ -532,14 +632,21 @@ func (sm *SessionManager) execCommand(command Command) {
 	case "select":
 		if checkParam(command.Params, 1) {
 			id := command.Params[0]
+			intent := command.Intent
 			for {
 				select {
 				case next := <-sm.CommandChannel:
 					if next.Name == "select" && checkParam(next.Params, 1) {
 						id = next.Params[0]
+						// COMMIT trumps PROBE: if anywhere in the
+						// coalesced burst the user pressed Enter, the
+						// final selection is a commit.
+						if next.Intent == SelectIntentCommit {
+							intent = SelectIntentCommit
+						}
 						continue
 					}
-					sm.setCurrentReceiver(id)
+					sm.setCurrentReceiver(id, intent)
 					sm.execCommand(next)
 					id = ""
 				default:
@@ -547,7 +654,7 @@ func (sm *SessionManager) execCommand(command Command) {
 				break
 			}
 			if id != "" {
-				sm.setCurrentReceiver(id)
+				sm.setCurrentReceiver(id, intent)
 			}
 		} else {
 			sm.printCommandUsage("select", "[chat-id[]")
@@ -580,6 +687,21 @@ func (sm *SessionManager) execCommand(command Command) {
 		sm.sendMediaCommand(command.Params, MessageKindAudio)
 	case "revoke":
 		sm.revokeMessage(command.Params)
+	case "forcetranslate":
+		// User-driven re-translate of a single message. Bypasses the
+		// classifier and any cached result so it always produces a
+		// fresh translation; we don't want our heuristics to trap
+		// users in "this is English" when it isn't.
+		if !checkParam(command.Params, 1) {
+			sm.printCommandUsage("forcetranslate", "[message-id[]")
+			break
+		}
+		msg, ok := sm.db.GetMessage(command.Params[0])
+		if !ok {
+			sm.uiHandler.PrintError(fmt.Errorf("message not found: %s", command.Params[0]))
+			break
+		}
+		sm.translateMessageForce(msg)
 	case "leave":
 		sm.leaveCurrentGroup()
 	case "create":
@@ -822,6 +944,11 @@ func (sm *SessionManager) markCurrentChatUnread() {
 		return
 	}
 
+	// A PROBE timer scheduled by the very selection that put us on this
+	// chat could otherwise fire moments after we mark unread, instantly
+	// undoing the user's action. Cancel it.
+	sm.cancelPendingAutoMarkRead()
+
 	sm.db.SetChatUnreadCount(sm.currentReceiver, 1)
 
 	patch := appstate.BuildMarkChatAsRead(chatJID, false, time.Now(), nil)
@@ -856,6 +983,13 @@ func (sm *SessionManager) downloadCommand(params []string, preview, show bool) {
 		sm.uiHandler.PrintError(err)
 		return
 	}
+
+	// Always notify the structured FileSaved hook so the gRPC TUI can
+	// pin the "→ saved to …" annotation under the originating message
+	// in the chat view. The tview legacy UI no-ops on this; it still
+	// gets the human-readable line via PrintText below for "download"
+	// and the OpenFile call for "open"/"show".
+	sm.uiHandler.FileSaved(msg.Id, path)
 
 	if show || preview {
 		sm.uiHandler.OpenFile(path)
@@ -1080,13 +1214,12 @@ func (sm *SessionManager) sendText(wid, text string) {
 
 	actualText := text
 	translated := false
-	if sm.Translator != nil && sm.Translator.IsReady() {
-		if threadLang, ok := sm.detectThreadLanguage(wid); ok {
-			targetCode := translate.ISOToDialectCode(threadLang, sm.Translator.Dialect())
-			if result, err := sm.Translator.TranslateFromEnglish(text, targetCode); err == nil && result != "" {
-				actualText = result
-				translated = true
-			}
+	if sm.shouldAutoTranslateOutgoing(wid) {
+		threadLang, _ := sm.detectThreadLanguage(wid)
+		targetCode := translate.ISOToDialectCode(threadLang, sm.Translator.Dialect())
+		if result, err := sm.Translator.TranslateFromEnglish(text, targetCode); err == nil && result != "" {
+			actualText = result
+			translated = true
 		}
 	}
 
@@ -1104,6 +1237,15 @@ func (sm *SessionManager) sendText(wid, text string) {
 		sm.uiHandler.NewMessage(newMsg)
 	}
 	sm.uiHandler.SetChats(sm.db.GetChatIds())
+
+	// Persist on send. Without this the message lives only in RAM, so a
+	// backend restart loses every outbound message that was never echoed
+	// back through the inbound event stream — and WhatsApp does not
+	// re-deliver self-sent messages once they've been ack'd, so the
+	// next history sync won't restore them either. Mirrors the
+	// SaveChatCache/SaveMessageCache calls in handleLiveMessage.
+	sm.db.SaveChatCache()
+	sm.db.SaveMessageCache()
 
 	if translated && sm.Translator != nil && sm.Translator.IsReady() {
 		go sm.translateIncoming(newMsg)
@@ -1219,6 +1361,20 @@ func (sm *SessionManager) transcribeAndTranslate(msg Message) {
 	}
 }
 
+// translateIncoming runs the per-message classifier from the translate
+// package and, when it says we should translate, invokes the LLM. The
+// classifier is the single source of truth for "do we translate this?";
+// see translate.ClassifyMessage for the rules.
+//
+// Historically this function had its own gating logic: it asked the
+// thread detector, vetoed everything if the thread looked English, and
+// then short-circuited again on a per-message English check. That broke
+// mixed-language threads where the counterpart was pre-translating to
+// English on their phone and only occasionally dropping back to their
+// native language - the very messages most worth translating got vetoed
+// because the thread (composed mostly of their pre-translated English)
+// looked English. The classifier in translate/detect.go handles all of
+// that now with a softer thread prior plus per-message overrides.
 func (sm *SessionManager) translateIncoming(msg Message) {
 	if msg.Text == "" || sm.Translator == nil || !sm.Translator.IsReady() {
 		return
@@ -1229,20 +1385,22 @@ func (sm *SessionManager) translateIncoming(msg Message) {
 		}
 		return
 	}
-	// Only translate when the surrounding thread is confidently non-English.
-	// Single-word messages (e.g. "Test", "Ok") are too short for reliable
-	// per-message language detection, so we trust the thread context instead.
-	threadLang, confident := sm.detectThreadLanguage(msg.ChatId)
-	if !confident || threadLang == "en" {
+
+	threadLang, _ := sm.detectThreadLanguage(msg.ChatId)
+	srcLang, decision := translate.ClassifyMessage(msg.Text, threadLang)
+	if decision != translate.DecisionTranslate {
 		return
 	}
-	if translate.IsEnglish(msg.Text) {
-		return
-	}
-	srcLang := translate.DetectLanguage(msg.Text)
-	if srcLang == "" || srcLang == "en" {
+	if srcLang == "" {
 		srcLang = threadLang
 	}
+	if srcLang == "" || srcLang == "en" {
+		// Defensive: ClassifyMessage shouldn't return DecisionTranslate
+		// without a usable source. If we ever do hit this, skip rather
+		// than feed the LLM an English source for English-looking text.
+		return
+	}
+
 	result, err := sm.Translator.TranslateToEnglish(msg.Text, srcLang)
 	if err != nil {
 		return
@@ -1251,6 +1409,52 @@ func (sm *SessionManager) translateIncoming(msg Message) {
 		sm.db.StoreTranslation(msg.Id, result)
 		sm.uiHandler.NewTranslation(msg, result)
 	}
+}
+
+// translateMessageForce runs translation on `msg` unconditionally,
+// bypassing the classifier and any cached result. Used by the manual
+// "translate this anyway" shortcut: if our heuristics ever disagree
+// with the user, they get the final word in one keystroke.
+//
+// The cached translation (if any) is wiped before the new one is stored
+// so the user-forced result becomes the new source of truth - retrying
+// would otherwise hit the cache and yield the (potentially wrong) old
+// translation.
+func (sm *SessionManager) translateMessageForce(msg Message) {
+	if msg.Text == "" || sm.Translator == nil || !sm.Translator.IsReady() {
+		return
+	}
+	threadLang, _ := sm.detectThreadLanguage(msg.ChatId)
+
+	srcLang := translate.DetectLanguage(msg.Text)
+	if srcLang == "" || srcLang == "en" {
+		// Fall back to the thread language so a forced-translate on a
+		// short or ambiguous message still has something to offer the
+		// LLM. If even that's empty, default to the dialect base
+		// (e.g. "es" from "es-CR") - the user explicitly asked us to
+		// translate, so refusing would be the wrong default.
+		if threadLang != "" && threadLang != "en" {
+			srcLang = threadLang
+		} else {
+			srcLang = translate.BaseLanguageCode(sm.Translator.Dialect())
+		}
+	}
+	if srcLang == "" {
+		return
+	}
+
+	sm.db.DeleteTranslation(msg.Id)
+	result, err := sm.Translator.TranslateToEnglish(msg.Text, srcLang)
+	if err != nil {
+		sm.uiHandler.PrintError(fmt.Errorf("translate: %v", err))
+		return
+	}
+	if result == "" {
+		return
+	}
+	sm.db.StoreTranslation(msg.Id, result)
+	sm.db.SaveTranslationCache()
+	sm.uiHandler.NewTranslation(msg, result)
 }
 
 func (sm *SessionManager) detectThreadLanguage(chatID string) (string, bool) {
@@ -1263,6 +1467,176 @@ func (sm *SessionManager) detectThreadLanguage(chatID string) (string, bool) {
 	}
 	return translate.DetectThreadLanguage(texts)
 }
+
+// shouldAutoTranslateOutgoing decides whether an outbound English message
+// should be silently translated into the chat's target language and sent
+// in that language *as the literal message body* rather than the user's
+// original English.
+//
+// Outbound translation has a much higher cost-of-error than inbound:
+//
+//   - A wrong inbound translation is just a noisy hint we render below
+//     the original; the user can ignore it and read the source.
+//   - A wrong *outbound* translation actually goes out over the wire to
+//     another human's phone. The recipient sees the wrong-language send;
+//     the sender has to revoke and re-type. We can't auto-correct it
+//     once it's out.
+//
+// The basic gate requires `confident=true` from
+// translate.DetectThreadLanguage (at least 4 non-English messages making
+// up >=40% of the recent ~30-message window). On top of that we layer a
+// "most-recent-message wins" tiebreaker that's *intentionally weakened*
+// in clearly-non-English threads:
+//
+//   - If the contact's overall history (looking at every incoming
+//     non-trivial message, not just the recent window) is at least
+//     allTimeNonEnglishFraction non-English, we treat the contact as
+//     a non-English-default speaker and ignore the latest-message
+//     tiebreaker. One English message from a contact who otherwise
+//     speaks Spanish in 9 out of 10 messages doesn't change what
+//     language the user wants to send back in.
+//
+//   - Otherwise (mixed-language contact, both languages routinely
+//     used), defer to the most recent message. If the counterpart's
+//     last reply was English we have an active English exchange in
+//     progress and a Spanish auto-send would be jarring.
+//
+// We use the contact's *all-time* fraction (not just recent) for the
+// strong-signal branch because slow-burn threads (a service contact who
+// messages once a month) often have only 2-3 incoming messages total -
+// any single English outlier swings a recent-window fraction by 30+
+// points and trips the rule for the wrong reasons. All-time history is
+// stable: a Spanish-speaking contact's earliest messages were Spanish,
+// their newest are Spanish, and one English line in between doesn't
+// change what they speak. Chatty threads are still dominated by recent
+// activity in the all-time count too (because chatty == high message
+// volume), so this doesn't make the system any less responsive to
+// users who genuinely change languages mid-relationship.
+//
+// The user can always undo via revoke+resend, and the (EN) annotation
+// shows what we sent, so the cost of a translate-when-undesired here is
+// recoverable. The cost of *not* translating when the contact is
+// clearly Spanish-default is much more annoying because the user has
+// to manually translate every reply for the rest of the conversation.
+func (sm *SessionManager) shouldAutoTranslateOutgoing(chatID string) bool {
+	if sm.Translator == nil || !sm.Translator.IsReady() {
+		return false
+	}
+	msgs := sm.db.GetMessages(chatID)
+	return decideAutoTranslateOutgoing(msgs)
+}
+
+// decideAutoTranslateOutgoing is the pure decision logic for
+// shouldAutoTranslateOutgoing, factored out so it can be unit-tested
+// without standing up a Translator + DB. Operates on the chat's
+// in-memory message list and uses only the public translate.* helpers.
+//
+// Decision flow, in order:
+//
+//  1. Compute the contact's all-time non-English fraction across every
+//     incoming non-trivial message. If it's at or above
+//     allTimeNonEnglishFraction (and we have at least
+//     minIncomingForAllTime messages to compute it from), the contact
+//     is a non-English-default speaker. Auto-translate, period.
+//     This branch handles slow-burn threads (e.g. a service contact
+//     who messages once a month in Spanish, then sends one English
+//     line) where the recent-window confidence flag would say "not
+//     enough samples" but the historical signal is unambiguous.
+//
+//  2. Fall back to the recent-window confidence flag from
+//     translate.DetectThreadLanguage. If the recent thread isn't
+//     confidently non-English we don't have enough signal to translate.
+//
+//  3. Recent-confident but not all-time-overwhelmingly non-English:
+//     the contact uses both languages routinely. Defer to the most
+//     recent incoming message - if it was English we're in an active
+//     English exchange and shouldn't break it.
+//
+// (1) before (2) is intentional: all-time fraction is a strictly
+// stronger signal than recent-window confidence (more data, less
+// susceptible to a single outlier swinging the fraction), so when
+// (1) fires, gating it on (2) would just make the system fail
+// to translate for the wrong reason.
+func decideAutoTranslateOutgoing(msgs []Message) bool {
+	const allTimeNonEnglishFraction = 0.60
+	const minIncomingForAllTime = 2
+
+	// (1) Strong all-time signal: contact's history is overwhelmingly
+	// non-English. Sufficient on its own.
+	frac, examined := allTimeNonEnglishFractionOf(msgs)
+	if examined >= minIncomingForAllTime && frac >= allTimeNonEnglishFraction {
+		return true
+	}
+
+	// (2) Recent-window confidence required for the rest of the flow.
+	texts := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		if !m.FromMe && m.Text != "" {
+			texts = append(texts, m.Text)
+		}
+	}
+	threadLang, confident := translate.DetectThreadLanguage(texts)
+	if !confident || threadLang == "" || threadLang == "en" {
+		return false
+	}
+
+	// (3) Mixed-but-confident contact: defer to the most recent message.
+	if last := lastIncomingNonTrivialOf(msgs); last != "" && translate.IsEnglish(last) {
+		return false
+	}
+	return true
+}
+
+// allTimeNonEnglishFractionOf returns (fraction, examined): what share
+// of every incoming non-trivial message in `msgs` classified as
+// non-English, and how many messages went into the count.
+//
+// Looks at the *entire* stored message history rather than the recent
+// window to stay stable on slow-burn threads where a single English
+// outlier message would otherwise swing a recent-window fraction by 30+
+// percentage points. Chatty threads remain dominated by their recent
+// activity in this count too (because chatty == high message volume),
+// so this doesn't make the system any less responsive to genuine
+// mid-relationship language changes.
+func allTimeNonEnglishFractionOf(msgs []Message) (float64, int) {
+	examined := 0
+	nonEnglish := 0
+	for _, m := range msgs {
+		if m.FromMe || m.Text == "" {
+			continue
+		}
+		if translate.IsTrivialNoOp(m.Text) {
+			continue
+		}
+		examined++
+		code := translate.IdentifyMessageLanguage(m.Text)
+		if code != "" && code != "en" {
+			nonEnglish++
+		}
+	}
+	if examined == 0 {
+		return 0, 0
+	}
+	return float64(nonEnglish) / float64(examined), examined
+}
+
+// lastIncomingNonTrivialOf returns the text of the most recent incoming
+// (i.e. !FromMe) non-trivial message in msgs, or "" if there is none.
+// Used by decideAutoTranslateOutgoing for the latest-message tiebreaker.
+func lastIncomingNonTrivialOf(msgs []Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.FromMe || m.Text == "" {
+			continue
+		}
+		if translate.IsTrivialNoOp(m.Text) {
+			continue
+		}
+		return m.Text
+	}
+	return ""
+}
+
 
 func (sm *SessionManager) sendMedia(chatID, path string, kind MessageKind) error {
 	if sm.client == nil || !sm.client.IsConnected() {
@@ -1347,6 +1721,12 @@ func (sm *SessionManager) sendMedia(chatID, path string, kind MessageKind) error
 		sm.uiHandler.NewMessage(newMsg)
 	}
 	sm.uiHandler.SetChats(sm.db.GetChatIds())
+
+	// Same persistence rationale as sendText: outbound media must hit
+	// disk now or it disappears across a backend restart, since WhatsApp
+	// won't re-deliver our own already-ack'd send to us.
+	sm.db.SaveChatCache()
+	sm.db.SaveMessageCache()
 	return nil
 }
 

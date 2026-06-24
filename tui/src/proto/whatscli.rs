@@ -3,7 +3,7 @@
 pub struct ClientMessage {
     #[prost(
         oneof = "client_message::Msg",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
     )]
     pub msg: ::core::option::Option<client_message::Msg>,
 }
@@ -57,6 +57,8 @@ pub mod client_message {
         SendVideo(super::SendVideoCommand),
         #[prost(message, tag = "23")]
         SendAudio(super::SendAudioCommand),
+        #[prost(message, tag = "24")]
+        ForceTranslate(super::ForceTranslate),
     }
 }
 /// First message on the Connect stream — client metadata, not a user action.
@@ -74,6 +76,59 @@ pub struct ConnectHandshake {
 pub struct SelectChat {
     #[prost(string, tag = "1")]
     pub chat_id: ::prost::alloc::string::String,
+    #[prost(enumeration = "select_chat::Intent", tag = "2")]
+    pub intent: i32,
+}
+/// Nested message and enum types in `SelectChat`.
+pub mod select_chat {
+    /// How strongly the client believes the user wants this chat.
+    ///
+    /// Drives the backend's auto-mark-as-read behaviour: PROBE selections (e.g.
+    /// arrow-key navigation through the chat list) defer the read receipt until
+    /// the user dwells on the chat, while COMMIT selections (e.g. Enter on a
+    /// chat row, or focus shifting into the composer) fire the read receipt
+    /// immediately. The chat content itself is loaded the same way for both,
+    /// so the user can see the messages instantly while still keeping unread
+    /// chats unread until they actually settle on one.
+    ///
+    /// Defaulting to PROBE preserves the safer behaviour for any client that
+    /// doesn't yet understand this field.
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        PartialEq,
+        Eq,
+        Hash,
+        PartialOrd,
+        Ord,
+        ::prost::Enumeration
+    )]
+    #[repr(i32)]
+    pub enum Intent {
+        Probe = 0,
+        Commit = 1,
+    }
+    impl Intent {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Probe => "PROBE",
+                Self::Commit => "COMMIT",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "PROBE" => Some(Self::Probe),
+                "COMMIT" => Some(Self::Commit),
+                _ => None,
+            }
+        }
+    }
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct RequestBacklog {}
@@ -202,6 +257,17 @@ pub struct GetInfo {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetUrl {
+    #[prost(string, tag = "1")]
+    pub message_id: ::prost::alloc::string::String,
+}
+/// Re-translate a message right now, bypassing the per-message translation
+/// classifier and any cached result. Used by the manual "translate this
+/// anyway" shortcut so the user can always override our heuristics in one
+/// keystroke when we got it wrong (e.g. classified a Spanish message as
+/// English in a mixed-language thread). The server emits a fresh
+/// NewTranslation event when it succeeds.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ForceTranslate {
     #[prost(string, tag = "1")]
     pub message_id: ::prost::alloc::string::String,
 }

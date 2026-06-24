@@ -55,6 +55,8 @@ message ClientMessage {
     SendImageCommand send_image = 21;
     SendVideoCommand send_video = 22;
     SendAudioCommand send_audio = 23;
+
+    ForceTranslate force_translate = 24;
   }
 }
 
@@ -68,6 +70,23 @@ message ConnectHandshake {
 
 message SelectChat {
   string chat_id = 1;
+  // How strongly the client believes the user wants this chat.
+  //
+  // Drives the backend's auto-mark-as-read behaviour: PROBE selections (e.g.
+  // arrow-key navigation through the chat list) defer the read receipt until
+  // the user dwells on the chat, while COMMIT selections (e.g. Enter on a
+  // chat row, or focus shifting into the composer) fire the read receipt
+  // immediately. The chat content itself is loaded the same way for both,
+  // so the user can see the messages instantly while still keeping unread
+  // chats unread until they actually settle on one.
+  //
+  // Defaulting to PROBE preserves the safer behaviour for any client that
+  // doesn't yet understand this field.
+  enum Intent {
+    PROBE = 0;
+    COMMIT = 1;
+  }
+  Intent intent = 2;
 }
 
 message RequestBacklog {}
@@ -140,6 +159,16 @@ message GetInfo {
 }
 
 message GetUrl {
+  string message_id = 1;
+}
+
+// Re-translate a message right now, bypassing the per-message translation
+// classifier and any cached result. Used by the manual "translate this
+// anyway" shortcut so the user can always override our heuristics in one
+// keystroke when we got it wrong (e.g. classified a Spanish message as
+// English in a mixed-language thread). The server emits a fresh
+// NewTranslation event when it succeeds.
+message ForceTranslate {
   string message_id = 1;
 }
 

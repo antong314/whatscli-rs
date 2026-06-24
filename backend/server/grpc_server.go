@@ -186,7 +186,15 @@ func (s *WhatsCLIServer) handleClientMessage(msg *pb.ClientMessage) {
 		return
 
 	case *pb.ClientMessage_SelectChat:
-		cmd = messages.Command{Name: "select", Params: []string{m.SelectChat.ChatId}}
+		intent := messages.SelectIntentProbe
+		if m.SelectChat.GetIntent() == pb.SelectChat_COMMIT {
+			intent = messages.SelectIntentCommit
+		}
+		cmd = messages.Command{
+			Name:   "select",
+			Params: []string{m.SelectChat.ChatId},
+			Intent: intent,
+		}
 	case *pb.ClientMessage_RequestBacklog:
 		cmd = messages.Command{Name: "backlog"}
 
@@ -216,6 +224,8 @@ func (s *WhatsCLIServer) handleClientMessage(msg *pb.ClientMessage) {
 
 	case *pb.ClientMessage_Revoke:
 		cmd = messages.Command{Name: "revoke", Params: []string{m.Revoke.MessageId}}
+	case *pb.ClientMessage_ForceTranslate:
+		cmd = messages.Command{Name: "forcetranslate", Params: []string{m.ForceTranslate.MessageId}}
 	case *pb.ClientMessage_LeaveGroup:
 		cmd = messages.Command{Name: "leave"}
 	case *pb.ClientMessage_CreateGroup:

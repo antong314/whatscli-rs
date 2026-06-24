@@ -261,7 +261,7 @@ func handleSwitchPanels(ev *tcell.EventKey) *tcell.EventKey {
 
 func handleCommand(command string) func(ev *tcell.EventKey) *tcell.EventKey {
 	return func(ev *tcell.EventKey) *tcell.EventKey {
-		sessionManager.CommandChannel <- messages.Command{command, nil}
+		sessionManager.CommandChannel <- messages.Command{Name: command}
 		return nil
 	}
 }
@@ -301,7 +301,7 @@ func safeReadClipboard() (clip string, err error) {
 }
 
 func handleQuit(ev *tcell.EventKey) *tcell.EventKey {
-	sessionManager.CommandChannel <- messages.Command{"disconnect", nil}
+	sessionManager.CommandChannel <- messages.Command{Name: "disconnect"}
 	app.Stop()
 	return nil
 }
@@ -315,7 +315,7 @@ func handleMessageCommand(command string) func(ev *tcell.EventKey) *tcell.EventK
 	return func(ev *tcell.EventKey) *tcell.EventKey {
 		hls := textView.GetHighlights()
 		if len(hls) > 0 {
-			sessionManager.CommandChannel <- messages.Command{command, []string{hls[0]}}
+			sessionManager.CommandChannel <- messages.Command{Name: command, Params: []string{hls[0]}}
 			ResetMsgSelection()
 			app.SetFocus(textInput)
 		}
@@ -715,7 +715,7 @@ func EnterCommand(key tcell.Key) {
 		return
 	}
 	if sndTxt == cmdPrefix+"quit" {
-		sessionManager.CommandChannel <- messages.Command{"disconnect", nil}
+		sessionManager.CommandChannel <- messages.Command{Name: "disconnect"}
 		app.Stop()
 		return
 	}
@@ -727,7 +727,7 @@ func EnterCommand(key tcell.Key) {
 			cmd = cmdParts[0]
 			params = cmdParts[1:]
 		}
-		sessionManager.CommandChannel <- messages.Command{cmd, params}
+		sessionManager.CommandChannel <- messages.Command{Name: cmd, Params: params}
 		textInput.SetText("")
 		return
 	}
@@ -853,7 +853,7 @@ func SetDisplayedChat(wid messages.Chat) {
 	currentReceiver = wid
 	textView.Clear()
 	textView.SetTitle(wid.Name)
-	sessionManager.CommandChannel <- messages.Command{"select", []string{currentReceiver.Id}}
+	sessionManager.CommandChannel <- messages.Command{Name: "select", Params: []string{currentReceiver.Id}}
 }
 
 // maxDisplayMessages limits how many messages are rendered in the chat view.
@@ -1240,6 +1240,12 @@ func (u UiHandler) PrintFile(path string) {
 		PrintImage(path)
 	})
 }
+
+// FileSaved is a no-op on the legacy tview UI: the path was already
+// printed via PrintText/PrintFile in the existing flow, and tview has no
+// concept of an inline per-message annotation. The gRPC handler is the
+// only consumer that does meaningful work here.
+func (u UiHandler) FileSaved(messageID, path string) {}
 
 func (u UiHandler) OpenFile(path string) {
 	open.Run(path)

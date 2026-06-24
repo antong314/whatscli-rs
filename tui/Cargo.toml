@@ -21,6 +21,8 @@ tower = "0.4"
 async-stream = "0.3"
 hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
+time = { version = "0.3", features = ["local-offset", "formatting", "macros"] }
+unicode-width = "0.2"
 
 [dev-dependencies]
 insta = "1"

@@ -39,10 +39,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         state.select(Some(app.chat_list_index.min(rows.len() - 1)));
     }
 
-    let title = if app.chat_filter.is_empty() {
-        " Chats ".to_string()
-    } else {
-        format!(" Chats: {} ", app.chat_filter)
+    let title = match (app.show_unread_only, app.chat_filter.is_empty()) {
+        (true, true) => " Chats (unread) ".to_string(),
+        (true, false) => format!(" Chats (unread): {} ", app.chat_filter),
+        (false, true) => " Chats ".to_string(),
+        (false, false) => format!(" Chats: {} ", app.chat_filter),
     };
 
     let list = List::new(items)

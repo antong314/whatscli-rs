@@ -735,6 +735,17 @@ func (md *MessageDatabase) GetTranslation(messageID string) (string, bool) {
 	return t, ok
 }
 
+// DeleteTranslation removes the cached translation for a message ID, if
+// any. Used when the user explicitly re-runs translation on a message:
+// we wipe the old result so the fresh translation becomes the canonical
+// one and a future read doesn't hit the stale cache. Idempotent - calling
+// on an unknown ID is a no-op.
+func (md *MessageDatabase) DeleteTranslation(messageID string) {
+	md.translationLock.Lock()
+	defer md.translationLock.Unlock()
+	delete(md.translations, messageID)
+}
+
 // SaveTranslationCache persists translations to disk.
 func (md *MessageDatabase) SaveTranslationCache() {
 	md.translationLock.RLock()

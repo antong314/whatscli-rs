@@ -2,10 +2,12 @@ package server
 
 import (
 	"io"
+	"log"
 	"sync"
 
 	pb "github.com/antong314/whatscli-rs/backend/gen/pb"
 	"github.com/antong314/whatscli-rs/backend/messages"
+	"github.com/skratchdot/open-golang/open"
 )
 
 // GrpcHandler implements messages.UiMessageHandler by forwarding all calls to
@@ -142,6 +144,21 @@ func (h *GrpcHandler) PrintFile(path string) {
 	})
 }
 
+// FileSaved emits a FileReady event with the originating message id, so
+// the TUI can pin the "→ saved to …" annotation under the right message
+// in the chat view. Used for explicit downloads triggered by the user
+// (s/o keys, /download, /open, /show).
+func (h *GrpcHandler) FileSaved(messageID, path string) {
+	h.broadcast.Send(&pb.ServerEvent{
+		Event: &pb.ServerEvent_FileReady{
+			FileReady: &pb.FileReady{
+				MessageId: messageID,
+				FilePath:  path,
+			},
+		},
+	})
+}
+
 func (h *GrpcHandler) SetStatus(status messages.SessionStatus) {
 	h.broadcast.Send(&pb.ServerEvent{
 		Event: &pb.ServerEvent_StatusUpdate{
@@ -156,7 +173,30 @@ func (h *GrpcHandler) SetStatus(status messages.SessionStatus) {
 	})
 }
 
+// OpenFile asks the host OS to open `path` with whatever the user has
+// configured as the default app for that file type (Preview for PDFs,
+// QuickTime for movies, the browser for URLs, etc.) and *also* tells the
+// TUI we did so via an OpenFileRequest event so the front-end can show a
+// confirmation toast.
+//
+// The OS-side open is fired in a goroutine: `open.Run` shells out to
+// `open` / `xdg-open` which can block briefly while LaunchServices spins
+// up the app, and we don't want that to stall the gRPC event stream.
+//
+// Note: this works because backend and TUI run on the same machine in
+// our split architecture. If we ever ship a remote backend we'll need
+// to push the open responsibility to the TUI side instead — at that
+// point the OpenFileRequest event below becomes the *only* trigger and
+// this goroutine should be removed.
 func (h *GrpcHandler) OpenFile(path string) {
+	if path != "" {
+		go func(p string) {
+			if err := open.Run(p); err != nil {
+				log.Printf("OpenFile: failed to open %q: %v", p, err)
+			}
+		}(path)
+	}
+
 	h.broadcast.Send(&pb.ServerEvent{
 		Event: &pb.ServerEvent_OpenFile{
 			OpenFile: &pb.OpenFileRequest{

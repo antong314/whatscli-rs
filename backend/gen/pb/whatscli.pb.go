@@ -79,6 +79,64 @@ func (MessageKind) EnumDescriptor() ([]byte, []int) {
 	return file_whatscli_proto_rawDescGZIP(), []int{0}
 }
 
+// How strongly the client believes the user wants this chat.
+//
+// Drives the backend's auto-mark-as-read behaviour: PROBE selections (e.g.
+// arrow-key navigation through the chat list) defer the read receipt until
+// the user dwells on the chat, while COMMIT selections (e.g. Enter on a
+// chat row, or focus shifting into the composer) fire the read receipt
+// immediately. The chat content itself is loaded the same way for both,
+// so the user can see the messages instantly while still keeping unread
+// chats unread until they actually settle on one.
+//
+// Defaulting to PROBE preserves the safer behaviour for any client that
+// doesn't yet understand this field.
+type SelectChat_Intent int32
+
+const (
+	SelectChat_PROBE  SelectChat_Intent = 0
+	SelectChat_COMMIT SelectChat_Intent = 1
+)
+
+// Enum value maps for SelectChat_Intent.
+var (
+	SelectChat_Intent_name = map[int32]string{
+		0: "PROBE",
+		1: "COMMIT",
+	}
+	SelectChat_Intent_value = map[string]int32{
+		"PROBE":  0,
+		"COMMIT": 1,
+	}
+)
+
+func (x SelectChat_Intent) Enum() *SelectChat_Intent {
+	p := new(SelectChat_Intent)
+	*p = x
+	return p
+}
+
+func (x SelectChat_Intent) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SelectChat_Intent) Descriptor() protoreflect.EnumDescriptor {
+	return file_whatscli_proto_enumTypes[1].Descriptor()
+}
+
+func (SelectChat_Intent) Type() protoreflect.EnumType {
+	return &file_whatscli_proto_enumTypes[1]
+}
+
+func (x SelectChat_Intent) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SelectChat_Intent.Descriptor instead.
+func (SelectChat_Intent) EnumDescriptor() ([]byte, []int) {
+	return file_whatscli_proto_rawDescGZIP(), []int{2, 0}
+}
+
 type GroupMember_Action int32
 
 const (
@@ -115,11 +173,11 @@ func (x GroupMember_Action) String() string {
 }
 
 func (GroupMember_Action) Descriptor() protoreflect.EnumDescriptor {
-	return file_whatscli_proto_enumTypes[1].Descriptor()
+	return file_whatscli_proto_enumTypes[2].Descriptor()
 }
 
 func (GroupMember_Action) Type() protoreflect.EnumType {
-	return &file_whatscli_proto_enumTypes[1]
+	return &file_whatscli_proto_enumTypes[2]
 }
 
 func (x GroupMember_Action) Number() protoreflect.EnumNumber {
@@ -158,6 +216,7 @@ type ClientMessage struct {
 	//	*ClientMessage_SendImage
 	//	*ClientMessage_SendVideo
 	//	*ClientMessage_SendAudio
+	//	*ClientMessage_ForceTranslate
 	Msg           isClientMessage_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -407,6 +466,15 @@ func (x *ClientMessage) GetSendAudio() *SendAudioCommand {
 	return nil
 }
 
+func (x *ClientMessage) GetForceTranslate() *ForceTranslate {
+	if x != nil {
+		if x, ok := x.Msg.(*ClientMessage_ForceTranslate); ok {
+			return x.ForceTranslate
+		}
+	}
+	return nil
+}
+
 type isClientMessage_Msg interface {
 	isClientMessage_Msg()
 }
@@ -503,6 +571,10 @@ type ClientMessage_SendAudio struct {
 	SendAudio *SendAudioCommand `protobuf:"bytes,23,opt,name=send_audio,json=sendAudio,proto3,oneof"`
 }
 
+type ClientMessage_ForceTranslate struct {
+	ForceTranslate *ForceTranslate `protobuf:"bytes,24,opt,name=force_translate,json=forceTranslate,proto3,oneof"`
+}
+
 func (*ClientMessage_Handshake) isClientMessage_Msg() {}
 
 func (*ClientMessage_SelectChat) isClientMessage_Msg() {}
@@ -548,6 +620,8 @@ func (*ClientMessage_SendImage) isClientMessage_Msg() {}
 func (*ClientMessage_SendVideo) isClientMessage_Msg() {}
 
 func (*ClientMessage_SendAudio) isClientMessage_Msg() {}
+
+func (*ClientMessage_ForceTranslate) isClientMessage_Msg() {}
 
 // First message on the Connect stream — client metadata, not a user action.
 // Also re-sent on terminal resize.
@@ -614,6 +688,7 @@ func (x *ConnectHandshake) GetClientVersion() string {
 type SelectChat struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ChatId        string                 `protobuf:"bytes,1,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
+	Intent        SelectChat_Intent      `protobuf:"varint,2,opt,name=intent,proto3,enum=whatscli.SelectChat_Intent" json:"intent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -653,6 +728,13 @@ func (x *SelectChat) GetChatId() string {
 		return x.ChatId
 	}
 	return ""
+}
+
+func (x *SelectChat) GetIntent() SelectChat_Intent {
+	if x != nil {
+		return x.Intent
+	}
+	return SelectChat_PROBE
 }
 
 type RequestBacklog struct {
@@ -1447,6 +1529,56 @@ func (x *GetUrl) GetMessageId() string {
 	return ""
 }
 
+// Re-translate a message right now, bypassing the per-message translation
+// classifier and any cached result. Used by the manual "translate this
+// anyway" shortcut so the user can always override our heuristics in one
+// keystroke when we got it wrong (e.g. classified a Spanish message as
+// English in a mixed-language thread). The server emits a fresh
+// NewTranslation event when it succeeds.
+type ForceTranslate struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MessageId     string                 `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ForceTranslate) Reset() {
+	*x = ForceTranslate{}
+	mi := &file_whatscli_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ForceTranslate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ForceTranslate) ProtoMessage() {}
+
+func (x *ForceTranslate) ProtoReflect() protoreflect.Message {
+	mi := &file_whatscli_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ForceTranslate.ProtoReflect.Descriptor instead.
+func (*ForceTranslate) Descriptor() ([]byte, []int) {
+	return file_whatscli_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ForceTranslate) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
 type SendImageCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	FilePath      string                 `protobuf:"bytes,1,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
@@ -1456,7 +1588,7 @@ type SendImageCommand struct {
 
 func (x *SendImageCommand) Reset() {
 	*x = SendImageCommand{}
-	mi := &file_whatscli_proto_msgTypes[21]
+	mi := &file_whatscli_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1468,7 +1600,7 @@ func (x *SendImageCommand) String() string {
 func (*SendImageCommand) ProtoMessage() {}
 
 func (x *SendImageCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[21]
+	mi := &file_whatscli_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1481,7 +1613,7 @@ func (x *SendImageCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendImageCommand.ProtoReflect.Descriptor instead.
 func (*SendImageCommand) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{21}
+	return file_whatscli_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SendImageCommand) GetFilePath() string {
@@ -1500,7 +1632,7 @@ type SendVideoCommand struct {
 
 func (x *SendVideoCommand) Reset() {
 	*x = SendVideoCommand{}
-	mi := &file_whatscli_proto_msgTypes[22]
+	mi := &file_whatscli_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1512,7 +1644,7 @@ func (x *SendVideoCommand) String() string {
 func (*SendVideoCommand) ProtoMessage() {}
 
 func (x *SendVideoCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[22]
+	mi := &file_whatscli_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1525,7 +1657,7 @@ func (x *SendVideoCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendVideoCommand.ProtoReflect.Descriptor instead.
 func (*SendVideoCommand) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{22}
+	return file_whatscli_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *SendVideoCommand) GetFilePath() string {
@@ -1544,7 +1676,7 @@ type SendAudioCommand struct {
 
 func (x *SendAudioCommand) Reset() {
 	*x = SendAudioCommand{}
-	mi := &file_whatscli_proto_msgTypes[23]
+	mi := &file_whatscli_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1556,7 +1688,7 @@ func (x *SendAudioCommand) String() string {
 func (*SendAudioCommand) ProtoMessage() {}
 
 func (x *SendAudioCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[23]
+	mi := &file_whatscli_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1569,7 +1701,7 @@ func (x *SendAudioCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendAudioCommand.ProtoReflect.Descriptor instead.
 func (*SendAudioCommand) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{23}
+	return file_whatscli_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *SendAudioCommand) GetFilePath() string {
@@ -1602,7 +1734,7 @@ type ServerEvent struct {
 
 func (x *ServerEvent) Reset() {
 	*x = ServerEvent{}
-	mi := &file_whatscli_proto_msgTypes[24]
+	mi := &file_whatscli_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1614,7 +1746,7 @@ func (x *ServerEvent) String() string {
 func (*ServerEvent) ProtoMessage() {}
 
 func (x *ServerEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[24]
+	mi := &file_whatscli_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1627,7 +1759,7 @@ func (x *ServerEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerEvent.ProtoReflect.Descriptor instead.
 func (*ServerEvent) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{24}
+	return file_whatscli_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ServerEvent) GetEvent() isServerEvent_Event {
@@ -1830,7 +1962,7 @@ type ChatList struct {
 
 func (x *ChatList) Reset() {
 	*x = ChatList{}
-	mi := &file_whatscli_proto_msgTypes[25]
+	mi := &file_whatscli_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1842,7 +1974,7 @@ func (x *ChatList) String() string {
 func (*ChatList) ProtoMessage() {}
 
 func (x *ChatList) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[25]
+	mi := &file_whatscli_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1855,7 +1987,7 @@ func (x *ChatList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatList.ProtoReflect.Descriptor instead.
 func (*ChatList) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{25}
+	return file_whatscli_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ChatList) GetChats() []*ChatProto {
@@ -1875,7 +2007,7 @@ type ChatMessages struct {
 
 func (x *ChatMessages) Reset() {
 	*x = ChatMessages{}
-	mi := &file_whatscli_proto_msgTypes[26]
+	mi := &file_whatscli_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1887,7 +2019,7 @@ func (x *ChatMessages) String() string {
 func (*ChatMessages) ProtoMessage() {}
 
 func (x *ChatMessages) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[26]
+	mi := &file_whatscli_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1900,7 +2032,7 @@ func (x *ChatMessages) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatMessages.ProtoReflect.Descriptor instead.
 func (*ChatMessages) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{26}
+	return file_whatscli_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ChatMessages) GetChatId() string {
@@ -1926,7 +2058,7 @@ type NewMessage struct {
 
 func (x *NewMessage) Reset() {
 	*x = NewMessage{}
-	mi := &file_whatscli_proto_msgTypes[27]
+	mi := &file_whatscli_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1938,7 +2070,7 @@ func (x *NewMessage) String() string {
 func (*NewMessage) ProtoMessage() {}
 
 func (x *NewMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[27]
+	mi := &file_whatscli_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1951,7 +2083,7 @@ func (x *NewMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NewMessage.ProtoReflect.Descriptor instead.
 func (*NewMessage) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{27}
+	return file_whatscli_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *NewMessage) GetMessage() *MessageProto {
@@ -1971,7 +2103,7 @@ type NewTranslation struct {
 
 func (x *NewTranslation) Reset() {
 	*x = NewTranslation{}
-	mi := &file_whatscli_proto_msgTypes[28]
+	mi := &file_whatscli_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1983,7 +2115,7 @@ func (x *NewTranslation) String() string {
 func (*NewTranslation) ProtoMessage() {}
 
 func (x *NewTranslation) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[28]
+	mi := &file_whatscli_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1996,7 +2128,7 @@ func (x *NewTranslation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NewTranslation.ProtoReflect.Descriptor instead.
 func (*NewTranslation) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{28}
+	return file_whatscli_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *NewTranslation) GetMessageId() string {
@@ -2023,7 +2155,7 @@ type NewTranscription struct {
 
 func (x *NewTranscription) Reset() {
 	*x = NewTranscription{}
-	mi := &file_whatscli_proto_msgTypes[29]
+	mi := &file_whatscli_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2035,7 +2167,7 @@ func (x *NewTranscription) String() string {
 func (*NewTranscription) ProtoMessage() {}
 
 func (x *NewTranscription) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[29]
+	mi := &file_whatscli_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2048,7 +2180,7 @@ func (x *NewTranscription) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NewTranscription.ProtoReflect.Descriptor instead.
 func (*NewTranscription) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{29}
+	return file_whatscli_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *NewTranscription) GetMessageId() string {
@@ -2078,7 +2210,7 @@ type StatusUpdate struct {
 
 func (x *StatusUpdate) Reset() {
 	*x = StatusUpdate{}
-	mi := &file_whatscli_proto_msgTypes[30]
+	mi := &file_whatscli_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2090,7 +2222,7 @@ func (x *StatusUpdate) String() string {
 func (*StatusUpdate) ProtoMessage() {}
 
 func (x *StatusUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[30]
+	mi := &file_whatscli_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2103,7 +2235,7 @@ func (x *StatusUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusUpdate.ProtoReflect.Descriptor instead.
 func (*StatusUpdate) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{30}
+	return file_whatscli_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *StatusUpdate) GetBatteryCharge() int32 {
@@ -2150,7 +2282,7 @@ type ErrorEvent struct {
 
 func (x *ErrorEvent) Reset() {
 	*x = ErrorEvent{}
-	mi := &file_whatscli_proto_msgTypes[31]
+	mi := &file_whatscli_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2162,7 +2294,7 @@ func (x *ErrorEvent) String() string {
 func (*ErrorEvent) ProtoMessage() {}
 
 func (x *ErrorEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[31]
+	mi := &file_whatscli_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2175,7 +2307,7 @@ func (x *ErrorEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ErrorEvent.ProtoReflect.Descriptor instead.
 func (*ErrorEvent) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{31}
+	return file_whatscli_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ErrorEvent) GetText() string {
@@ -2194,7 +2326,7 @@ type InfoText struct {
 
 func (x *InfoText) Reset() {
 	*x = InfoText{}
-	mi := &file_whatscli_proto_msgTypes[32]
+	mi := &file_whatscli_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2206,7 +2338,7 @@ func (x *InfoText) String() string {
 func (*InfoText) ProtoMessage() {}
 
 func (x *InfoText) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[32]
+	mi := &file_whatscli_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2219,7 +2351,7 @@ func (x *InfoText) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InfoText.ProtoReflect.Descriptor instead.
 func (*InfoText) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{32}
+	return file_whatscli_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *InfoText) GetText() string {
@@ -2239,7 +2371,7 @@ type FileReady struct {
 
 func (x *FileReady) Reset() {
 	*x = FileReady{}
-	mi := &file_whatscli_proto_msgTypes[33]
+	mi := &file_whatscli_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2251,7 +2383,7 @@ func (x *FileReady) String() string {
 func (*FileReady) ProtoMessage() {}
 
 func (x *FileReady) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[33]
+	mi := &file_whatscli_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2264,7 +2396,7 @@ func (x *FileReady) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileReady.ProtoReflect.Descriptor instead.
 func (*FileReady) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{33}
+	return file_whatscli_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *FileReady) GetMessageId() string {
@@ -2290,7 +2422,7 @@ type OpenFileRequest struct {
 
 func (x *OpenFileRequest) Reset() {
 	*x = OpenFileRequest{}
-	mi := &file_whatscli_proto_msgTypes[34]
+	mi := &file_whatscli_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2302,7 +2434,7 @@ func (x *OpenFileRequest) String() string {
 func (*OpenFileRequest) ProtoMessage() {}
 
 func (x *OpenFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[34]
+	mi := &file_whatscli_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2315,7 +2447,7 @@ func (x *OpenFileRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenFileRequest.ProtoReflect.Descriptor instead.
 func (*OpenFileRequest) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{34}
+	return file_whatscli_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *OpenFileRequest) GetFilePath() string {
@@ -2336,7 +2468,7 @@ type ModelProgress struct {
 
 func (x *ModelProgress) Reset() {
 	*x = ModelProgress{}
-	mi := &file_whatscli_proto_msgTypes[35]
+	mi := &file_whatscli_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2348,7 +2480,7 @@ func (x *ModelProgress) String() string {
 func (*ModelProgress) ProtoMessage() {}
 
 func (x *ModelProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[35]
+	mi := &file_whatscli_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2361,7 +2493,7 @@ func (x *ModelProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelProgress.ProtoReflect.Descriptor instead.
 func (*ModelProgress) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{35}
+	return file_whatscli_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ModelProgress) GetModelName() string {
@@ -2394,7 +2526,7 @@ type ColorList struct {
 
 func (x *ColorList) Reset() {
 	*x = ColorList{}
-	mi := &file_whatscli_proto_msgTypes[36]
+	mi := &file_whatscli_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2406,7 +2538,7 @@ func (x *ColorList) String() string {
 func (*ColorList) ProtoMessage() {}
 
 func (x *ColorList) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[36]
+	mi := &file_whatscli_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2419,7 +2551,7 @@ func (x *ColorList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ColorList.ProtoReflect.Descriptor instead.
 func (*ColorList) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{36}
+	return file_whatscli_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ColorList) GetColors() []string {
@@ -2438,7 +2570,7 @@ type MediaRequest struct {
 
 func (x *MediaRequest) Reset() {
 	*x = MediaRequest{}
-	mi := &file_whatscli_proto_msgTypes[37]
+	mi := &file_whatscli_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2450,7 +2582,7 @@ func (x *MediaRequest) String() string {
 func (*MediaRequest) ProtoMessage() {}
 
 func (x *MediaRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[37]
+	mi := &file_whatscli_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2463,7 +2595,7 @@ func (x *MediaRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MediaRequest.ProtoReflect.Descriptor instead.
 func (*MediaRequest) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{37}
+	return file_whatscli_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *MediaRequest) GetMessageId() string {
@@ -2484,7 +2616,7 @@ type MediaChunk struct {
 
 func (x *MediaChunk) Reset() {
 	*x = MediaChunk{}
-	mi := &file_whatscli_proto_msgTypes[38]
+	mi := &file_whatscli_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2496,7 +2628,7 @@ func (x *MediaChunk) String() string {
 func (*MediaChunk) ProtoMessage() {}
 
 func (x *MediaChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[38]
+	mi := &file_whatscli_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2509,7 +2641,7 @@ func (x *MediaChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MediaChunk.ProtoReflect.Descriptor instead.
 func (*MediaChunk) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{38}
+	return file_whatscli_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *MediaChunk) GetData() []byte {
@@ -2548,7 +2680,7 @@ type LoginEvent struct {
 
 func (x *LoginEvent) Reset() {
 	*x = LoginEvent{}
-	mi := &file_whatscli_proto_msgTypes[39]
+	mi := &file_whatscli_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2560,7 +2692,7 @@ func (x *LoginEvent) String() string {
 func (*LoginEvent) ProtoMessage() {}
 
 func (x *LoginEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[39]
+	mi := &file_whatscli_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2573,7 +2705,7 @@ func (x *LoginEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoginEvent.ProtoReflect.Descriptor instead.
 func (*LoginEvent) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{39}
+	return file_whatscli_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *LoginEvent) GetEvent() isLoginEvent_Event {
@@ -2657,7 +2789,7 @@ type QrCode struct {
 
 func (x *QrCode) Reset() {
 	*x = QrCode{}
-	mi := &file_whatscli_proto_msgTypes[40]
+	mi := &file_whatscli_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2669,7 +2801,7 @@ func (x *QrCode) String() string {
 func (*QrCode) ProtoMessage() {}
 
 func (x *QrCode) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[40]
+	mi := &file_whatscli_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2682,7 +2814,7 @@ func (x *QrCode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QrCode.ProtoReflect.Descriptor instead.
 func (*QrCode) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{40}
+	return file_whatscli_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *QrCode) GetPngData() []byte {
@@ -2707,7 +2839,7 @@ type LoginSuccess struct {
 
 func (x *LoginSuccess) Reset() {
 	*x = LoginSuccess{}
-	mi := &file_whatscli_proto_msgTypes[41]
+	mi := &file_whatscli_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2719,7 +2851,7 @@ func (x *LoginSuccess) String() string {
 func (*LoginSuccess) ProtoMessage() {}
 
 func (x *LoginSuccess) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[41]
+	mi := &file_whatscli_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2732,7 +2864,7 @@ func (x *LoginSuccess) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoginSuccess.ProtoReflect.Descriptor instead.
 func (*LoginSuccess) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{41}
+	return file_whatscli_proto_rawDescGZIP(), []int{42}
 }
 
 type LoginTimeout struct {
@@ -2743,7 +2875,7 @@ type LoginTimeout struct {
 
 func (x *LoginTimeout) Reset() {
 	*x = LoginTimeout{}
-	mi := &file_whatscli_proto_msgTypes[42]
+	mi := &file_whatscli_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2755,7 +2887,7 @@ func (x *LoginTimeout) String() string {
 func (*LoginTimeout) ProtoMessage() {}
 
 func (x *LoginTimeout) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[42]
+	mi := &file_whatscli_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2768,7 +2900,7 @@ func (x *LoginTimeout) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoginTimeout.ProtoReflect.Descriptor instead.
 func (*LoginTimeout) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{42}
+	return file_whatscli_proto_rawDescGZIP(), []int{43}
 }
 
 type LoginError struct {
@@ -2780,7 +2912,7 @@ type LoginError struct {
 
 func (x *LoginError) Reset() {
 	*x = LoginError{}
-	mi := &file_whatscli_proto_msgTypes[43]
+	mi := &file_whatscli_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2792,7 +2924,7 @@ func (x *LoginError) String() string {
 func (*LoginError) ProtoMessage() {}
 
 func (x *LoginError) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[43]
+	mi := &file_whatscli_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2805,7 +2937,7 @@ func (x *LoginError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoginError.ProtoReflect.Descriptor instead.
 func (*LoginError) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{43}
+	return file_whatscli_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *LoginError) GetMessage() string {
@@ -2830,7 +2962,7 @@ type ChatProto struct {
 
 func (x *ChatProto) Reset() {
 	*x = ChatProto{}
-	mi := &file_whatscli_proto_msgTypes[44]
+	mi := &file_whatscli_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2842,7 +2974,7 @@ func (x *ChatProto) String() string {
 func (*ChatProto) ProtoMessage() {}
 
 func (x *ChatProto) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[44]
+	mi := &file_whatscli_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2855,7 +2987,7 @@ func (x *ChatProto) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatProto.ProtoReflect.Descriptor instead.
 func (*ChatProto) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{44}
+	return file_whatscli_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ChatProto) GetId() string {
@@ -2929,7 +3061,7 @@ type MessageProto struct {
 
 func (x *MessageProto) Reset() {
 	*x = MessageProto{}
-	mi := &file_whatscli_proto_msgTypes[45]
+	mi := &file_whatscli_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2941,7 +3073,7 @@ func (x *MessageProto) String() string {
 func (*MessageProto) ProtoMessage() {}
 
 func (x *MessageProto) ProtoReflect() protoreflect.Message {
-	mi := &file_whatscli_proto_msgTypes[45]
+	mi := &file_whatscli_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2954,7 +3086,7 @@ func (x *MessageProto) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MessageProto.ProtoReflect.Descriptor instead.
 func (*MessageProto) Descriptor() ([]byte, []int) {
-	return file_whatscli_proto_rawDescGZIP(), []int{45}
+	return file_whatscli_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *MessageProto) GetId() string {
@@ -3059,7 +3191,7 @@ var File_whatscli_proto protoreflect.FileDescriptor
 
 const file_whatscli_proto_rawDesc = "" +
 	"\n" +
-	"\x0ewhatscli.proto\x12\bwhatscli\"\xa6\n" +
+	"\x0ewhatscli.proto\x12\bwhatscli\"\xeb\n" +
 	"\n" +
 	"\rClientMessage\x12:\n" +
 	"\thandshake\x18\x01 \x01(\v2\x1a.whatscli.ConnectHandshakeH\x00R\thandshake\x127\n" +
@@ -3097,15 +3229,21 @@ const file_whatscli_proto_rawDesc = "" +
 	"\n" +
 	"send_video\x18\x16 \x01(\v2\x1a.whatscli.SendVideoCommandH\x00R\tsendVideo\x12;\n" +
 	"\n" +
-	"send_audio\x18\x17 \x01(\v2\x1a.whatscli.SendAudioCommandH\x00R\tsendAudioB\x05\n" +
+	"send_audio\x18\x17 \x01(\v2\x1a.whatscli.SendAudioCommandH\x00R\tsendAudio\x12C\n" +
+	"\x0fforce_translate\x18\x18 \x01(\v2\x18.whatscli.ForceTranslateH\x00R\x0eforceTranslateB\x05\n" +
 	"\x03msg\"\x83\x01\n" +
 	"\x10ConnectHandshake\x12#\n" +
 	"\rviewport_rows\x18\x01 \x01(\x05R\fviewportRows\x12#\n" +
 	"\rviewport_cols\x18\x02 \x01(\x05R\fviewportCols\x12%\n" +
-	"\x0eclient_version\x18\x03 \x01(\tR\rclientVersion\"%\n" +
+	"\x0eclient_version\x18\x03 \x01(\tR\rclientVersion\"{\n" +
 	"\n" +
 	"SelectChat\x12\x17\n" +
-	"\achat_id\x18\x01 \x01(\tR\x06chatId\"\x10\n" +
+	"\achat_id\x18\x01 \x01(\tR\x06chatId\x123\n" +
+	"\x06intent\x18\x02 \x01(\x0e2\x1b.whatscli.SelectChat.IntentR\x06intent\"\x1f\n" +
+	"\x06Intent\x12\t\n" +
+	"\x05PROBE\x10\x00\x12\n" +
+	"\n" +
+	"\x06COMMIT\x10\x01\"\x10\n" +
 	"\x0eRequestBacklog\"7\n" +
 	"\bSendText\x12\x17\n" +
 	"\achat_id\x18\x01 \x01(\tR\x06chatId\x12\x12\n" +
@@ -3156,6 +3294,9 @@ const file_whatscli_proto_rawDesc = "" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\"'\n" +
 	"\x06GetUrl\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x01 \x01(\tR\tmessageId\"/\n" +
+	"\x0eForceTranslate\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\"/\n" +
 	"\x10SendImageCommand\x12\x1b\n" +
@@ -3283,7 +3424,7 @@ const file_whatscli_proto_rawDesc = "" +
 	"\bWhatsCLI\x12A\n" +
 	"\vEventStream\x12\x17.whatscli.ClientMessage\x1a\x15.whatscli.ServerEvent(\x010\x01\x12:\n" +
 	"\bGetMedia\x12\x16.whatscli.MediaRequest\x1a\x14.whatscli.MediaChunk0\x01\x127\n" +
-	"\x05Login\x12\x16.whatscli.LoginRequest\x1a\x14.whatscli.LoginEvent0\x01B#Z!github.com/antong314/whatscli-rs/backend/gen/pbb\x06proto3"
+	"\x05Login\x12\x16.whatscli.LoginRequest\x1a\x14.whatscli.LoginEvent0\x01B1Z/github.com/antong314/whatscli-rs/backend/gen/pbb\x06proto3"
 
 var (
 	file_whatscli_proto_rawDescOnce sync.Once
@@ -3297,115 +3438,119 @@ func file_whatscli_proto_rawDescGZIP() []byte {
 	return file_whatscli_proto_rawDescData
 }
 
-var file_whatscli_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_whatscli_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
+var file_whatscli_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_whatscli_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
 var file_whatscli_proto_goTypes = []any{
 	(MessageKind)(0),          // 0: whatscli.MessageKind
-	(GroupMember_Action)(0),   // 1: whatscli.GroupMember.Action
-	(*ClientMessage)(nil),     // 2: whatscli.ClientMessage
-	(*ConnectHandshake)(nil),  // 3: whatscli.ConnectHandshake
-	(*SelectChat)(nil),        // 4: whatscli.SelectChat
-	(*RequestBacklog)(nil),    // 5: whatscli.RequestBacklog
-	(*SendText)(nil),          // 6: whatscli.SendText
-	(*SendMedia)(nil),         // 7: whatscli.SendMedia
-	(*MarkRead)(nil),          // 8: whatscli.MarkRead
-	(*MarkUnread)(nil),        // 9: whatscli.MarkUnread
-	(*LoginRequest)(nil),      // 10: whatscli.LoginRequest
-	(*DisconnectRequest)(nil), // 11: whatscli.DisconnectRequest
-	(*LogoutRequest)(nil),     // 12: whatscli.LogoutRequest
-	(*DownloadMedia)(nil),     // 13: whatscli.DownloadMedia
-	(*OpenMedia)(nil),         // 14: whatscli.OpenMedia
-	(*ShowMedia)(nil),         // 15: whatscli.ShowMedia
-	(*RevokeMessage)(nil),     // 16: whatscli.RevokeMessage
-	(*LeaveGroup)(nil),        // 17: whatscli.LeaveGroup
-	(*CreateGroup)(nil),       // 18: whatscli.CreateGroup
-	(*GroupMember)(nil),       // 19: whatscli.GroupMember
-	(*SetSubject)(nil),        // 20: whatscli.SetSubject
-	(*GetInfo)(nil),           // 21: whatscli.GetInfo
-	(*GetUrl)(nil),            // 22: whatscli.GetUrl
-	(*SendImageCommand)(nil),  // 23: whatscli.SendImageCommand
-	(*SendVideoCommand)(nil),  // 24: whatscli.SendVideoCommand
-	(*SendAudioCommand)(nil),  // 25: whatscli.SendAudioCommand
-	(*ServerEvent)(nil),       // 26: whatscli.ServerEvent
-	(*ChatList)(nil),          // 27: whatscli.ChatList
-	(*ChatMessages)(nil),      // 28: whatscli.ChatMessages
-	(*NewMessage)(nil),        // 29: whatscli.NewMessage
-	(*NewTranslation)(nil),    // 30: whatscli.NewTranslation
-	(*NewTranscription)(nil),  // 31: whatscli.NewTranscription
-	(*StatusUpdate)(nil),      // 32: whatscli.StatusUpdate
-	(*ErrorEvent)(nil),        // 33: whatscli.ErrorEvent
-	(*InfoText)(nil),          // 34: whatscli.InfoText
-	(*FileReady)(nil),         // 35: whatscli.FileReady
-	(*OpenFileRequest)(nil),   // 36: whatscli.OpenFileRequest
-	(*ModelProgress)(nil),     // 37: whatscli.ModelProgress
-	(*ColorList)(nil),         // 38: whatscli.ColorList
-	(*MediaRequest)(nil),      // 39: whatscli.MediaRequest
-	(*MediaChunk)(nil),        // 40: whatscli.MediaChunk
-	(*LoginEvent)(nil),        // 41: whatscli.LoginEvent
-	(*QrCode)(nil),            // 42: whatscli.QrCode
-	(*LoginSuccess)(nil),      // 43: whatscli.LoginSuccess
-	(*LoginTimeout)(nil),      // 44: whatscli.LoginTimeout
-	(*LoginError)(nil),        // 45: whatscli.LoginError
-	(*ChatProto)(nil),         // 46: whatscli.ChatProto
-	(*MessageProto)(nil),      // 47: whatscli.MessageProto
+	(SelectChat_Intent)(0),    // 1: whatscli.SelectChat.Intent
+	(GroupMember_Action)(0),   // 2: whatscli.GroupMember.Action
+	(*ClientMessage)(nil),     // 3: whatscli.ClientMessage
+	(*ConnectHandshake)(nil),  // 4: whatscli.ConnectHandshake
+	(*SelectChat)(nil),        // 5: whatscli.SelectChat
+	(*RequestBacklog)(nil),    // 6: whatscli.RequestBacklog
+	(*SendText)(nil),          // 7: whatscli.SendText
+	(*SendMedia)(nil),         // 8: whatscli.SendMedia
+	(*MarkRead)(nil),          // 9: whatscli.MarkRead
+	(*MarkUnread)(nil),        // 10: whatscli.MarkUnread
+	(*LoginRequest)(nil),      // 11: whatscli.LoginRequest
+	(*DisconnectRequest)(nil), // 12: whatscli.DisconnectRequest
+	(*LogoutRequest)(nil),     // 13: whatscli.LogoutRequest
+	(*DownloadMedia)(nil),     // 14: whatscli.DownloadMedia
+	(*OpenMedia)(nil),         // 15: whatscli.OpenMedia
+	(*ShowMedia)(nil),         // 16: whatscli.ShowMedia
+	(*RevokeMessage)(nil),     // 17: whatscli.RevokeMessage
+	(*LeaveGroup)(nil),        // 18: whatscli.LeaveGroup
+	(*CreateGroup)(nil),       // 19: whatscli.CreateGroup
+	(*GroupMember)(nil),       // 20: whatscli.GroupMember
+	(*SetSubject)(nil),        // 21: whatscli.SetSubject
+	(*GetInfo)(nil),           // 22: whatscli.GetInfo
+	(*GetUrl)(nil),            // 23: whatscli.GetUrl
+	(*ForceTranslate)(nil),    // 24: whatscli.ForceTranslate
+	(*SendImageCommand)(nil),  // 25: whatscli.SendImageCommand
+	(*SendVideoCommand)(nil),  // 26: whatscli.SendVideoCommand
+	(*SendAudioCommand)(nil),  // 27: whatscli.SendAudioCommand
+	(*ServerEvent)(nil),       // 28: whatscli.ServerEvent
+	(*ChatList)(nil),          // 29: whatscli.ChatList
+	(*ChatMessages)(nil),      // 30: whatscli.ChatMessages
+	(*NewMessage)(nil),        // 31: whatscli.NewMessage
+	(*NewTranslation)(nil),    // 32: whatscli.NewTranslation
+	(*NewTranscription)(nil),  // 33: whatscli.NewTranscription
+	(*StatusUpdate)(nil),      // 34: whatscli.StatusUpdate
+	(*ErrorEvent)(nil),        // 35: whatscli.ErrorEvent
+	(*InfoText)(nil),          // 36: whatscli.InfoText
+	(*FileReady)(nil),         // 37: whatscli.FileReady
+	(*OpenFileRequest)(nil),   // 38: whatscli.OpenFileRequest
+	(*ModelProgress)(nil),     // 39: whatscli.ModelProgress
+	(*ColorList)(nil),         // 40: whatscli.ColorList
+	(*MediaRequest)(nil),      // 41: whatscli.MediaRequest
+	(*MediaChunk)(nil),        // 42: whatscli.MediaChunk
+	(*LoginEvent)(nil),        // 43: whatscli.LoginEvent
+	(*QrCode)(nil),            // 44: whatscli.QrCode
+	(*LoginSuccess)(nil),      // 45: whatscli.LoginSuccess
+	(*LoginTimeout)(nil),      // 46: whatscli.LoginTimeout
+	(*LoginError)(nil),        // 47: whatscli.LoginError
+	(*ChatProto)(nil),         // 48: whatscli.ChatProto
+	(*MessageProto)(nil),      // 49: whatscli.MessageProto
 }
 var file_whatscli_proto_depIdxs = []int32{
-	3,  // 0: whatscli.ClientMessage.handshake:type_name -> whatscli.ConnectHandshake
-	4,  // 1: whatscli.ClientMessage.select_chat:type_name -> whatscli.SelectChat
-	5,  // 2: whatscli.ClientMessage.request_backlog:type_name -> whatscli.RequestBacklog
-	6,  // 3: whatscli.ClientMessage.send_text:type_name -> whatscli.SendText
-	7,  // 4: whatscli.ClientMessage.send_media:type_name -> whatscli.SendMedia
-	8,  // 5: whatscli.ClientMessage.mark_read:type_name -> whatscli.MarkRead
-	9,  // 6: whatscli.ClientMessage.mark_unread:type_name -> whatscli.MarkUnread
-	10, // 7: whatscli.ClientMessage.login:type_name -> whatscli.LoginRequest
-	11, // 8: whatscli.ClientMessage.disconnect:type_name -> whatscli.DisconnectRequest
-	12, // 9: whatscli.ClientMessage.logout:type_name -> whatscli.LogoutRequest
-	13, // 10: whatscli.ClientMessage.download_media:type_name -> whatscli.DownloadMedia
-	14, // 11: whatscli.ClientMessage.open_media:type_name -> whatscli.OpenMedia
-	16, // 12: whatscli.ClientMessage.revoke:type_name -> whatscli.RevokeMessage
-	17, // 13: whatscli.ClientMessage.leave_group:type_name -> whatscli.LeaveGroup
-	18, // 14: whatscli.ClientMessage.create_group:type_name -> whatscli.CreateGroup
-	19, // 15: whatscli.ClientMessage.group_member:type_name -> whatscli.GroupMember
-	20, // 16: whatscli.ClientMessage.set_subject:type_name -> whatscli.SetSubject
-	21, // 17: whatscli.ClientMessage.get_info:type_name -> whatscli.GetInfo
-	22, // 18: whatscli.ClientMessage.get_url:type_name -> whatscli.GetUrl
-	15, // 19: whatscli.ClientMessage.show_media:type_name -> whatscli.ShowMedia
-	23, // 20: whatscli.ClientMessage.send_image:type_name -> whatscli.SendImageCommand
-	24, // 21: whatscli.ClientMessage.send_video:type_name -> whatscli.SendVideoCommand
-	25, // 22: whatscli.ClientMessage.send_audio:type_name -> whatscli.SendAudioCommand
-	0,  // 23: whatscli.SendMedia.kind:type_name -> whatscli.MessageKind
-	1,  // 24: whatscli.GroupMember.action:type_name -> whatscli.GroupMember.Action
-	27, // 25: whatscli.ServerEvent.chat_list:type_name -> whatscli.ChatList
-	28, // 26: whatscli.ServerEvent.chat_messages:type_name -> whatscli.ChatMessages
-	29, // 27: whatscli.ServerEvent.new_message:type_name -> whatscli.NewMessage
-	30, // 28: whatscli.ServerEvent.new_translation:type_name -> whatscli.NewTranslation
-	31, // 29: whatscli.ServerEvent.new_transcription:type_name -> whatscli.NewTranscription
-	32, // 30: whatscli.ServerEvent.status_update:type_name -> whatscli.StatusUpdate
-	33, // 31: whatscli.ServerEvent.error_event:type_name -> whatscli.ErrorEvent
-	34, // 32: whatscli.ServerEvent.info_text:type_name -> whatscli.InfoText
-	35, // 33: whatscli.ServerEvent.file_ready:type_name -> whatscli.FileReady
-	36, // 34: whatscli.ServerEvent.open_file:type_name -> whatscli.OpenFileRequest
-	37, // 35: whatscli.ServerEvent.model_progress:type_name -> whatscli.ModelProgress
-	38, // 36: whatscli.ServerEvent.color_list:type_name -> whatscli.ColorList
-	46, // 37: whatscli.ChatList.chats:type_name -> whatscli.ChatProto
-	47, // 38: whatscli.ChatMessages.messages:type_name -> whatscli.MessageProto
-	47, // 39: whatscli.NewMessage.message:type_name -> whatscli.MessageProto
-	42, // 40: whatscli.LoginEvent.qr_code:type_name -> whatscli.QrCode
-	43, // 41: whatscli.LoginEvent.success:type_name -> whatscli.LoginSuccess
-	44, // 42: whatscli.LoginEvent.timeout:type_name -> whatscli.LoginTimeout
-	45, // 43: whatscli.LoginEvent.error:type_name -> whatscli.LoginError
-	0,  // 44: whatscli.MessageProto.kind:type_name -> whatscli.MessageKind
-	2,  // 45: whatscli.WhatsCLI.EventStream:input_type -> whatscli.ClientMessage
-	39, // 46: whatscli.WhatsCLI.GetMedia:input_type -> whatscli.MediaRequest
-	10, // 47: whatscli.WhatsCLI.Login:input_type -> whatscli.LoginRequest
-	26, // 48: whatscli.WhatsCLI.EventStream:output_type -> whatscli.ServerEvent
-	40, // 49: whatscli.WhatsCLI.GetMedia:output_type -> whatscli.MediaChunk
-	41, // 50: whatscli.WhatsCLI.Login:output_type -> whatscli.LoginEvent
-	48, // [48:51] is the sub-list for method output_type
-	45, // [45:48] is the sub-list for method input_type
-	45, // [45:45] is the sub-list for extension type_name
-	45, // [45:45] is the sub-list for extension extendee
-	0,  // [0:45] is the sub-list for field type_name
+	4,  // 0: whatscli.ClientMessage.handshake:type_name -> whatscli.ConnectHandshake
+	5,  // 1: whatscli.ClientMessage.select_chat:type_name -> whatscli.SelectChat
+	6,  // 2: whatscli.ClientMessage.request_backlog:type_name -> whatscli.RequestBacklog
+	7,  // 3: whatscli.ClientMessage.send_text:type_name -> whatscli.SendText
+	8,  // 4: whatscli.ClientMessage.send_media:type_name -> whatscli.SendMedia
+	9,  // 5: whatscli.ClientMessage.mark_read:type_name -> whatscli.MarkRead
+	10, // 6: whatscli.ClientMessage.mark_unread:type_name -> whatscli.MarkUnread
+	11, // 7: whatscli.ClientMessage.login:type_name -> whatscli.LoginRequest
+	12, // 8: whatscli.ClientMessage.disconnect:type_name -> whatscli.DisconnectRequest
+	13, // 9: whatscli.ClientMessage.logout:type_name -> whatscli.LogoutRequest
+	14, // 10: whatscli.ClientMessage.download_media:type_name -> whatscli.DownloadMedia
+	15, // 11: whatscli.ClientMessage.open_media:type_name -> whatscli.OpenMedia
+	17, // 12: whatscli.ClientMessage.revoke:type_name -> whatscli.RevokeMessage
+	18, // 13: whatscli.ClientMessage.leave_group:type_name -> whatscli.LeaveGroup
+	19, // 14: whatscli.ClientMessage.create_group:type_name -> whatscli.CreateGroup
+	20, // 15: whatscli.ClientMessage.group_member:type_name -> whatscli.GroupMember
+	21, // 16: whatscli.ClientMessage.set_subject:type_name -> whatscli.SetSubject
+	22, // 17: whatscli.ClientMessage.get_info:type_name -> whatscli.GetInfo
+	23, // 18: whatscli.ClientMessage.get_url:type_name -> whatscli.GetUrl
+	16, // 19: whatscli.ClientMessage.show_media:type_name -> whatscli.ShowMedia
+	25, // 20: whatscli.ClientMessage.send_image:type_name -> whatscli.SendImageCommand
+	26, // 21: whatscli.ClientMessage.send_video:type_name -> whatscli.SendVideoCommand
+	27, // 22: whatscli.ClientMessage.send_audio:type_name -> whatscli.SendAudioCommand
+	24, // 23: whatscli.ClientMessage.force_translate:type_name -> whatscli.ForceTranslate
+	1,  // 24: whatscli.SelectChat.intent:type_name -> whatscli.SelectChat.Intent
+	0,  // 25: whatscli.SendMedia.kind:type_name -> whatscli.MessageKind
+	2,  // 26: whatscli.GroupMember.action:type_name -> whatscli.GroupMember.Action
+	29, // 27: whatscli.ServerEvent.chat_list:type_name -> whatscli.ChatList
+	30, // 28: whatscli.ServerEvent.chat_messages:type_name -> whatscli.ChatMessages
+	31, // 29: whatscli.ServerEvent.new_message:type_name -> whatscli.NewMessage
+	32, // 30: whatscli.ServerEvent.new_translation:type_name -> whatscli.NewTranslation
+	33, // 31: whatscli.ServerEvent.new_transcription:type_name -> whatscli.NewTranscription
+	34, // 32: whatscli.ServerEvent.status_update:type_name -> whatscli.StatusUpdate
+	35, // 33: whatscli.ServerEvent.error_event:type_name -> whatscli.ErrorEvent
+	36, // 34: whatscli.ServerEvent.info_text:type_name -> whatscli.InfoText
+	37, // 35: whatscli.ServerEvent.file_ready:type_name -> whatscli.FileReady
+	38, // 36: whatscli.ServerEvent.open_file:type_name -> whatscli.OpenFileRequest
+	39, // 37: whatscli.ServerEvent.model_progress:type_name -> whatscli.ModelProgress
+	40, // 38: whatscli.ServerEvent.color_list:type_name -> whatscli.ColorList
+	48, // 39: whatscli.ChatList.chats:type_name -> whatscli.ChatProto
+	49, // 40: whatscli.ChatMessages.messages:type_name -> whatscli.MessageProto
+	49, // 41: whatscli.NewMessage.message:type_name -> whatscli.MessageProto
+	44, // 42: whatscli.LoginEvent.qr_code:type_name -> whatscli.QrCode
+	45, // 43: whatscli.LoginEvent.success:type_name -> whatscli.LoginSuccess
+	46, // 44: whatscli.LoginEvent.timeout:type_name -> whatscli.LoginTimeout
+	47, // 45: whatscli.LoginEvent.error:type_name -> whatscli.LoginError
+	0,  // 46: whatscli.MessageProto.kind:type_name -> whatscli.MessageKind
+	3,  // 47: whatscli.WhatsCLI.EventStream:input_type -> whatscli.ClientMessage
+	41, // 48: whatscli.WhatsCLI.GetMedia:input_type -> whatscli.MediaRequest
+	11, // 49: whatscli.WhatsCLI.Login:input_type -> whatscli.LoginRequest
+	28, // 50: whatscli.WhatsCLI.EventStream:output_type -> whatscli.ServerEvent
+	42, // 51: whatscli.WhatsCLI.GetMedia:output_type -> whatscli.MediaChunk
+	43, // 52: whatscli.WhatsCLI.Login:output_type -> whatscli.LoginEvent
+	50, // [50:53] is the sub-list for method output_type
+	47, // [47:50] is the sub-list for method input_type
+	47, // [47:47] is the sub-list for extension type_name
+	47, // [47:47] is the sub-list for extension extendee
+	0,  // [0:47] is the sub-list for field type_name
 }
 
 func init() { file_whatscli_proto_init() }
@@ -3437,8 +3582,9 @@ func file_whatscli_proto_init() {
 		(*ClientMessage_SendImage)(nil),
 		(*ClientMessage_SendVideo)(nil),
 		(*ClientMessage_SendAudio)(nil),
+		(*ClientMessage_ForceTranslate)(nil),
 	}
-	file_whatscli_proto_msgTypes[24].OneofWrappers = []any{
+	file_whatscli_proto_msgTypes[25].OneofWrappers = []any{
 		(*ServerEvent_ChatList)(nil),
 		(*ServerEvent_ChatMessages)(nil),
 		(*ServerEvent_NewMessage)(nil),
@@ -3452,7 +3598,7 @@ func file_whatscli_proto_init() {
 		(*ServerEvent_ModelProgress)(nil),
 		(*ServerEvent_ColorList)(nil),
 	}
-	file_whatscli_proto_msgTypes[39].OneofWrappers = []any{
+	file_whatscli_proto_msgTypes[40].OneofWrappers = []any{
 		(*LoginEvent_QrCode)(nil),
 		(*LoginEvent_Success)(nil),
 		(*LoginEvent_Timeout)(nil),
@@ -3463,8 +3609,8 @@ func file_whatscli_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_whatscli_proto_rawDesc), len(file_whatscli_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   46,
+			NumEnums:      3,
+			NumMessages:   47,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

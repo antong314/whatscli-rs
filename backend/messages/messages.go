@@ -17,6 +17,17 @@ type UiMessageHandler interface {
 	PrintError(error)
 	PrintText(string)
 	PrintFile(string)
+	// FileSaved is the structured "save complete" hook: it carries the
+	// message id alongside the on-disk path so the gRPC layer can emit a
+	// FileReady event with both fields. The legacy tview UI uses
+	// PrintFile (path-only); the gRPC server uses FileSaved so the Rust
+	// TUI can correlate the saved file back to the originating message
+	// (and render the inline "→ saved to …" annotation under it).
+	//
+	// Both are called for the same event in the gRPC handler so logs /
+	// info text continue to work for any consumer that only watches
+	// PrintFile.
+	FileSaved(messageID, path string)
 	SetStatus(SessionStatus)
 	OpenFile(string)
 	GetWriter() io.Writer
@@ -52,10 +63,29 @@ type StatusMsg struct {
 	err       error
 }
 
+// SelectIntent describes how strongly the client believes the user wants
+// the chat referenced by a "select" Command. PROBE selections (e.g. arrow-key
+// navigation through the chat list) defer the auto-mark-as-read read receipt;
+// COMMIT selections (e.g. Enter on a chat row) fire it immediately.
+//
+// Defaulting to PROBE means any caller that forgets to set the intent gets
+// the safer behaviour - we won't accidentally clear unread state for a chat
+// the user only briefly arrowed past.
+type SelectIntent int
+
+const (
+	SelectIntentProbe  SelectIntent = 0
+	SelectIntentCommit SelectIntent = 1
+)
+
 // message object for commands
 type Command struct {
 	Name   string
 	Params []string
+	// Intent is meaningful only for `Name == "select"`; it is otherwise zero
+	// (PROBE) and ignored. Adding it as a struct field instead of a magic
+	// string in Params keeps the wire-format/dispatch code obvious.
+	Intent SelectIntent
 }
 
 type MessageKind string

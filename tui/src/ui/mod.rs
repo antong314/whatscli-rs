@@ -1,8 +1,11 @@
 pub mod chat_list;
+pub mod help;
 pub mod input_bar;
 pub mod message_view;
 pub mod qr_login;
 pub mod status_bar;
+pub mod timestamps;
+pub mod wrap;
 
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -42,6 +45,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     input_bar::render(f, outer[2], app);
+
+    // Modal layer: drawn last so it overlays everything beneath it.
+    if app.show_help {
+        let max_scroll = help::render_modal(f, total_area, app);
+        // Clamp scroll to the actual content height so a user who paged past
+        // the end on a tall window doesn't see a blank popup if they later
+        // resize down (or vice versa).
+        if app.help_scroll > max_scroll {
+            app.help_scroll = max_scroll;
+        }
+    }
 }
 
 /// Pick the input area height for this frame.
