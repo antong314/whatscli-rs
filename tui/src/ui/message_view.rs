@@ -112,7 +112,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
     let now = OffsetDateTime::now_utc();
     let mut last_day_key: Option<(i32, u16)> = None;
 
-    for msg in &app.messages {
+    for (msg_idx, msg) in app.messages.iter().enumerate() {
+        let is_cursored = app.message_cursor == Some(msg_idx);
         let msg_start = lines.len();
         // Day-boundary divider (Slack-style). Only emit when the message has a
         // real timestamp - defensive against backend bugs that would produce
@@ -183,6 +184,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
 
         if let Some(transcription) = app.transcriptions.get(&msg.id) {
             wrap_annotation(&mut lines, "[TR]", transcription, dim_style, inner_width);
+            // Copy affordance: a long voice-note transcript is painful to
+            // select with the mouse, so surface a one-key copy hint directly
+            // beneath the transcript of the *selected* message. Pressing `c`
+            // (see `handle_attachment_shortcut`) copies it to the clipboard.
+            if is_cursored {
+                push_copy_hint(&mut lines, inner_width);
+            }
         }
 
         if let Some(translation) = app.translations.get(&msg.id) {
@@ -519,6 +527,25 @@ fn wrap_message<'a>(
             }
         }
     }
+}
+
+/// Push a dim, one-key copy hint aligned under an annotation body. Shown only
+/// for the cursored message's transcript so the chat isn't cluttered with a
+/// hint on every voice note — it behaves like a hover affordance that appears
+/// on the selected row. The leading glyph reads as a "copy" icon; the text
+/// spells out the key so the shortcut is discoverable without opening help.
+fn push_copy_hint<'a>(lines: &mut Vec<Line<'a>>, width: usize) {
+    if width <= PREFIX_WIDTH {
+        // No room for the body column; skip rather than wrap the hint oddly.
+        return;
+    }
+    let style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::DIM);
+    lines.push(Line::from(vec![
+        Span::raw(" ".repeat(PREFIX_WIDTH)),
+        Span::styled("\u{2398} press c to copy transcript", style),
+    ]));
 }
 
 /// Render an annotation (transcription / translation) attached to the message

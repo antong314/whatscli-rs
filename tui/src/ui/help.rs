@@ -95,6 +95,9 @@ pub fn help_lines() -> Vec<Line<'static>> {
     lines.push(Line::from(
         "    t            Force-translate cursored message (overrides auto-skip)",
     ));
+    lines.push(Line::from(
+        "    c            Copy cursored message (transcript > translation > text)",
+    ));
     lines.push(blank());
 
     lines.push(h("  App"));

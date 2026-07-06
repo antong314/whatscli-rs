@@ -552,6 +552,9 @@ fn handle_message_pane_arrow(app: &mut App, code: KeyCode) -> Option<ClientMessa
 ///   Used when the auto-translation got it wrong (typically a
 ///   non-English message in a thread that the classifier mistook
 ///   for English). Only valid on text messages with non-empty text.
+/// * `c` — copy the cursored message's text to the clipboard. Prefers
+///   the transcript (the point: long voice-note transcripts are a pain
+///   to select by hand), then a translation, then the message body.
 ///
 /// Returns `Some(cmd)` if the key was claimed *and* produced a server
 /// command, `Some(None-equivalent)` via early-return when claimed without
@@ -563,7 +566,7 @@ fn handle_attachment_shortcut(
     key: event::KeyEvent,
 ) -> Option<Option<ClientMessage>> {
     let c = match key.code {
-        KeyCode::Char(c) if matches!(c, 's' | 'o' | 'd' | 't') => c,
+        KeyCode::Char(c) if matches!(c, 's' | 'o' | 'd' | 't' | 'c') => c,
         _ => return None,
     };
 
@@ -590,6 +593,13 @@ fn handle_attachment_shortcut(
         's' | 'o' if !is_downloadable(msg) => {
             app.show_toast(
                 "No attachment on this message".into(),
+                state::ToastLevel::Info,
+            );
+            return Some(None);
+        }
+        'c' if copyable_content(app, msg).is_none() => {
+            app.show_toast(
+                "Nothing to copy on this message".into(),
                 state::ToastLevel::Info,
             );
             return Some(None);
@@ -638,8 +648,57 @@ fn handle_attachment_shortcut(
                 })),
             }))
         }
+        'c' => {
+            // `copyable_content` already vetted (applicability guard above),
+            // so `unwrap_or_default` only guards against a TOCTOU-style empty
+            // and never actually fires here.
+            let content = copyable_content(app, msg).unwrap_or_default();
+            match copy_to_clipboard(&content) {
+                Ok(()) => app.show_toast(
+                    "Copied to clipboard".into(),
+                    state::ToastLevel::Success,
+                ),
+                Err(e) => app.show_toast(
+                    format!("Copy failed: {e}"),
+                    state::ToastLevel::Error,
+                ),
+            }
+            Some(None)
+        }
         _ => unreachable!(),
     }
+}
+
+/// Resolve what pressing `c` copies for a message. Transcript wins — that's the
+/// whole reason this exists, since a multi-minute voice note produces a wall of
+/// text that's miserable to select with a mouse. Falls back to a translation,
+/// then the message's own text. Returns `None` when there's nothing worth
+/// copying (e.g. a bare image with no caption, transcript, or translation).
+fn copyable_content(app: &App, msg: &pb::MessageProto) -> Option<String> {
+    if let Some(tr) = app.transcriptions.get(&msg.id)
+        && !tr.trim().is_empty()
+    {
+        return Some(tr.clone());
+    }
+    if let Some(tl) = app.translations.get(&msg.id)
+        && !tl.trim().is_empty()
+    {
+        return Some(tl.clone());
+    }
+    if !msg.text.trim().is_empty() {
+        return Some(msg.text.clone());
+    }
+    None
+}
+
+/// Put `text` on the system clipboard. Each call opens a fresh `arboard`
+/// handle; on macOS/Windows that hands ownership to the OS pasteboard, so the
+/// text survives the handle being dropped. Errors are surfaced to the user as
+/// a toast rather than swallowed, since a silent failed copy is worse than a
+/// visible one.
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(text.to_string()).map_err(|e| e.to_string())
 }
 
 /// Resolve a previously-armed `d` (revoke) confirmation. `y`/`Y` fires
@@ -1118,6 +1177,53 @@ mod tests {
         assert!(
             toast.text.to_lowercase().contains("no attachment"),
             "toast should explain why nothing happened, got {:?}",
+            toast.text
+        );
+    }
+
+    #[test]
+    fn copyable_content_prefers_transcript_over_translation_and_text() {
+        let mut app = App::default();
+        app.messages = vec![text_message("m1", "original text")];
+        app.translations.insert("m1".into(), "translated text".into());
+        app.transcriptions.insert("m1".into(), "the transcript".into());
+
+        let msg = app.messages[0].clone();
+        assert_eq!(copyable_content(&app, &msg).as_deref(), Some("the transcript"));
+
+        // Drop the transcript: translation should win next.
+        app.transcriptions.clear();
+        assert_eq!(copyable_content(&app, &msg).as_deref(), Some("translated text"));
+
+        // Drop the translation too: fall back to the message body.
+        app.translations.clear();
+        assert_eq!(copyable_content(&app, &msg).as_deref(), Some("original text"));
+    }
+
+    #[test]
+    fn copyable_content_is_none_when_nothing_worth_copying() {
+        let mut app = App::default();
+        // A bare media message with no caption, transcript, or translation.
+        app.messages = vec![doc_message("m1", "photo.jpg")];
+        app.messages[0].text = String::new();
+        let msg = app.messages[0].clone();
+        assert!(copyable_content(&app, &msg).is_none());
+    }
+
+    #[test]
+    fn c_on_message_with_no_content_shows_info_toast_and_sends_nothing() {
+        let mut app = App::default();
+        let mut m = doc_message("m1", "photo.jpg");
+        m.text = String::new();
+        app.messages = vec![m];
+        app.message_cursor = Some(0);
+
+        let cmd = handle_composer_key(&mut app, key(KeyCode::Char('c')));
+        assert!(cmd.is_none(), "copy is a local action, never a server command");
+        let toast = app.toast.as_ref().expect("should explain why nothing was copied");
+        assert!(
+            toast.text.to_lowercase().contains("nothing to copy"),
+            "got {:?}",
             toast.text
         );
     }
