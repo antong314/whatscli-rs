@@ -97,6 +97,18 @@ func (h *GrpcHandler) NewScreen(msgs []messages.Message) {
 	})
 }
 
+func (h *GrpcHandler) MessageStatus(chatID string, messageIDs []string, status messages.MessageStatus) {
+	h.broadcast.Send(&pb.ServerEvent{
+		Event: &pb.ServerEvent_MessageStatus{
+			MessageStatus: &pb.MessageStatusUpdate{
+				ChatId:     chatID,
+				MessageIds: messageIDs,
+				Status:     messageStatusToProto(status),
+			},
+		},
+	})
+}
+
 func (h *GrpcHandler) SetChats(chats []messages.Chat) {
 	pbChats := make([]*pb.ChatProto, 0, len(chats))
 	for _, c := range chats {
@@ -300,6 +312,22 @@ func messageToProto(m messages.Message) *pb.MessageProto {
 		MimeType:     m.MimeType,
 		FileName:     m.FileName,
 		Unread:       m.Unread,
+		Status:       messageStatusToProto(m.Status),
+	}
+}
+
+func messageStatusToProto(s messages.MessageStatus) pb.MessageStatus {
+	switch s {
+	case messages.MessageStatusPending:
+		return pb.MessageStatus_MESSAGE_STATUS_PENDING
+	case messages.MessageStatusSent:
+		return pb.MessageStatus_MESSAGE_STATUS_SENT
+	case messages.MessageStatusDelivered:
+		return pb.MessageStatus_MESSAGE_STATUS_DELIVERED
+	case messages.MessageStatusRead:
+		return pb.MessageStatus_MESSAGE_STATUS_READ
+	default:
+		return pb.MessageStatus_MESSAGE_STATUS_UNKNOWN
 	}
 }
 

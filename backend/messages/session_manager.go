@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"os"
@@ -22,6 +23,8 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -70,7 +73,31 @@ type SessionManager struct {
 	// Defaults to sm.autoMarkRead in Init. Tests can swap this out to count
 	// invocations without standing up a real WhatsApp client.
 	markReadFn func(chatID string)
+
+	// avatarMu guards avatarCache. WhatsApp rate-limits profile-picture
+	// lookups, so results — including "has no picture" — are cached for the
+	// lifetime of the session.
+	avatarMu    sync.Mutex
+	avatarCache map[string]avatarEntry
+
+	// chatRefreshMu guards chatRefreshTimer, which coalesces bursts of
+	// read-state events (a full app-state resync emits one per chat) into a
+	// single chat-list push and cache save instead of hundreds.
+	chatRefreshMu    sync.Mutex
+	chatRefreshTimer *time.Timer
 }
+
+// avatarEntry is one cached profile-picture lookup. err is non-nil for
+// negative results (no picture set / not visible to us).
+type avatarEntry struct {
+	data []byte
+	mime string
+	err  error
+}
+
+// ErrNoAvatar marks chats without a (visible) profile picture so the gRPC
+// layer can map them to NOT_FOUND instead of a hard error.
+var ErrNoAvatar = errors.New("chat has no profile picture")
 
 // DefaultMarkReadDelay is how long we wait after a user PROBE-selects a chat
 // (e.g. via Up/Down arrow) before marking it as read. Picked to be longer
@@ -353,7 +380,14 @@ func (sm *SessionManager) getConnection() (*whatsmeow.Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get device: %v", err)
 		}
-		client := whatsmeow.NewClient(deviceStore, waLog.Noop)
+		// Set WHATSCLI_LOG=1 to get whatsmeow debug logs on stderr; the app
+		// supervisor discards them, so this only matters when the server is
+		// run by hand to diagnose sync issues.
+		clientLog := waLog.Noop
+		if os.Getenv("WHATSCLI_LOG") != "" {
+			clientLog = waLog.Stdout("Client", "DEBUG", false)
+		}
+		client := whatsmeow.NewClient(deviceStore, clientLog)
 		client.AddEventHandler(sm.eventHandler.Handle)
 		sm.client = client
 		sm.container = container
@@ -431,17 +465,38 @@ func (sm *SessionManager) loginWithQRCode(client *whatsmeow.Client) error {
 }
 
 func (sm *SessionManager) loadRecentChats() {
+	debugLoad := os.Getenv("WHATSCLI_UNREAD_PROBE") != ""
+	trace := func(step string) {
+		if debugLoad {
+			fmt.Fprintf(os.Stdout, "[load-trace] %s\n", step)
+		}
+	}
+	trace("start")
+	// Connect() returns before the handshake finishes, so give the
+	// connection a moment instead of bailing — losing this race used to
+	// leave the session up but the chat list never loaded.
+	for i := 0; i < 40 && (sm.client == nil || !sm.client.IsConnected()); i++ {
+		time.Sleep(250 * time.Millisecond)
+	}
 	if sm.client == nil || !sm.client.IsConnected() {
+		trace("gave up waiting for connection")
 		sm.uiHandler.PrintError(errors.New("not connected to WhatsApp"))
 		return
 	}
+	trace("connected")
 
 	sm.db.LoadChatCache()
 	sm.db.LoadMessageCache()
+	trace("caches loaded")
+	// Unread flags older than WhatsApp's offline-receipt replay window can
+	// never be reconciled with the phone again; drop them so long downtimes
+	// don't leave permanent phantom badges.
+	sm.db.PruneStaleUnread(time.Now().Add(-14 * 24 * time.Hour).Unix())
 	sm.db.RecomputeUnreadCounts()
 	sm.loadContacts()
 	sm.db.RefreshContactNames()
 	sm.db.SaveMessageCache()
+	trace("contacts refreshed, message cache saved")
 
 	groups, err := sm.client.GetJoinedGroups(context.Background())
 	if err == nil {
@@ -453,10 +508,32 @@ func (sm *SessionManager) loadRecentChats() {
 			})
 		}
 	}
+	trace("groups loaded")
 
 	sm.syncChatSettings()
+	trace("chat settings synced")
 	sm.syncAppState()
+	trace("app state synced")
 	sm.uiHandler.SetChats(sm.db.GetChatIds())
+
+	// Converge unread badges with the phone in the background; receipts
+	// missed while we were offline are gone forever, so ask the phone
+	// directly for its current per-chat state.
+	go sm.reconcileUnreadWithPhone()
+
+	// Diagnostic hook: WHATSCLI_UNREAD_PROBE=<jid>[,<jid>…] requests an
+	// on-demand history sync for those chats after connect, to test whether
+	// the phone reports unreadCount in the responses.
+	if probe := os.Getenv("WHATSCLI_UNREAD_PROBE"); probe != "" {
+		for _, chatID := range strings.Split(probe, ",") {
+			chatID = strings.TrimSpace(chatID)
+			if err := sm.requestChatHistorySync(chatID); err != nil {
+				fmt.Fprintf(os.Stdout, "[unread-probe] request %s failed: %v\n", chatID, err)
+			} else {
+				fmt.Fprintf(os.Stdout, "[unread-probe] requested history sync for %s\n", chatID)
+			}
+		}
+	}
 }
 
 // syncChatSettings reads archived/pinned state from whatsmeow's ChatSettingsStore
@@ -479,17 +556,95 @@ func (sm *SessionManager) syncChatSettings() {
 	}
 }
 
-// syncAppState fetches incremental app state patches to get MarkChatAsRead
-// events that tell us which chats have been read or marked unread on the phone.
-// On first sync the full snapshot is downloaded so every chat's read/unread
-// state is known; subsequent runs only download patches.
+// syncAppState fetches app state to get MarkChatAsRead events that tell us
+// which chats have been read or marked unread on the phone.
+//
+// The first sync of each launch replays the FULL regular_low collection.
+// Empirically the server compacts old mark-read entries away (the snapshot
+// can be a few hundred bytes), so this is NOT a full historical
+// reconciliation — its real value is (a) whatever recent read/unread actions
+// the server still holds, and (b) resetting our local LTHash state, which
+// otherwise drifts and makes our own SendAppState mark-unread patches bounce
+// with 409/mismatching-LTHash. Reconnects within the same process only fetch
+// incremental patches. Historical convergence comes from read-self receipts
+// (live + offline replay) and PruneStaleUnread.
 func (sm *SessionManager) syncAppState() {
 	if sm.client == nil {
 		return
 	}
 	sm.client.EmitAppStateEventsOnFullSync = true
 	ctx := context.Background()
-	_ = sm.client.FetchAppState(ctx, appstate.WAPatchRegularLow, false, false)
+	// INCREMENTAL by default: the version cursor persists in the session DB,
+	// so this replays every patch the phone wrote while we were offline —
+	// including markChatAsRead. (A full resync would DELETE that cursor and
+	// re-seed from the server's compacted snapshot, silently discarding the
+	// offline patches, so full sync is reserved for corruption repair.)
+	err := sm.client.FetchAppState(ctx, appstate.WAPatchRegularLow, false, false)
+	if err != nil {
+		// Mismatching-LTHash means our local app state is corrupted; reset
+		// it with a full resync (also what fixes SendAppState 409s).
+		err = sm.client.FetchAppState(ctx, appstate.WAPatchRegularLow, true, false)
+	}
+	if err != nil {
+		sm.uiHandler.PrintError(fmt.Errorf("read-state sync with phone failed: %v", err))
+	}
+}
+
+// reconcileUnreadWithPhone asks the phone for the authoritative unread state
+// of the most recently active chats, once per launch. Read receipts only
+// reach us while we're running (WhatsApp's offline replay is bounded and
+// lossy for busy groups), so after downtime our local unread flags drift
+// from the phone. On-demand history sync responses carry the phone's own
+// unreadCount per conversation; handleHistorySync applies them. Runs in a
+// goroutine: one peer message per chat, spaced out to be polite.
+func (sm *SessionManager) reconcileUnreadWithPhone() {
+	const maxChats = 30
+	requested := 0
+	for _, chat := range sm.db.GetChatIds() {
+		if requested >= maxChats {
+			break
+		}
+		if err := sm.requestChatHistorySync(chat.Id); err != nil {
+			continue // no anchor message or transient send failure — skip
+		}
+		requested++
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+// requestChatHistorySync asks the primary phone for the most recent history
+// of one chat via an on-demand history sync peer message. The response
+// arrives as an events.HistorySync (type ON_DEMAND) and flows through
+// handleHistorySync, which applies the phone's own unreadCount — the only
+// authoritative source of a chat's read state.
+func (sm *SessionManager) requestChatHistorySync(chatID string) error {
+	if sm.client == nil || !sm.client.IsConnected() {
+		return errors.New("not connected")
+	}
+	jid, err := types.ParseJID(chatID)
+	if err != nil {
+		return err
+	}
+	// The phone indexes migrated 1:1 chats by LID; a request addressed by
+	// phone-number JID gets silently ignored for those, so translate first.
+	if jid.Server == types.DefaultUserServer && sm.client.Store != nil && sm.client.Store.LIDs != nil {
+		if lid, lidErr := sm.client.Store.LIDs.GetLIDForPN(context.Background(), jid); lidErr == nil && !lid.IsEmpty() {
+			jid = lid
+		}
+	}
+	msgs := sm.db.GetMessages(chatID)
+	if len(msgs) == 0 {
+		return errors.New("no anchor message for " + chatID)
+	}
+	last := msgs[len(msgs)-1]
+	info := &types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: jid, IsFromMe: last.FromMe},
+		ID:            last.Id,
+		Timestamp:     time.Unix(int64(last.Timestamp), 0),
+	}
+	req := sm.client.BuildHistorySyncRequest(info, 50)
+	_, err = sm.client.SendPeerMessage(context.Background(), req)
+	return err
 }
 
 func (sm *SessionManager) loadContacts() {
@@ -952,12 +1107,93 @@ func (sm *SessionManager) markCurrentChatUnread() {
 	sm.db.SetChatUnreadCount(sm.currentReceiver, 1)
 
 	patch := appstate.BuildMarkChatAsRead(chatJID, false, time.Now(), nil)
-	if err := sm.client.SendAppState(context.Background(), patch); err != nil {
+	err = sm.client.SendAppState(context.Background(), patch)
+	if err != nil {
+		// Our local app-state snapshot can drift from the server's (surfacing
+		// as a 409 conflict / "mismatching LTHash"). Force a full resync of
+		// the collection and retry once before giving up.
+		if resyncErr := sm.client.FetchAppState(context.Background(), appstate.WAPatchRegularLow, true, false); resyncErr == nil {
+			err = sm.client.SendAppState(context.Background(), patch)
+		}
+	}
+	if err != nil {
 		sm.uiHandler.PrintError(fmt.Errorf("failed to mark chat as unread: %v", err))
 	}
 
 	sm.uiHandler.SetChats(sm.db.GetChatIds())
 	sm.db.SaveChatCache()
+}
+
+// GetAvatar returns the profile picture for a chat (contact photo or group
+// icon), fetching it from WhatsApp on first use and caching it — including
+// misses — for the session.
+func (sm *SessionManager) GetAvatar(chatID string, preview bool) ([]byte, string, error) {
+	key := chatID
+	if preview {
+		key += "|preview"
+	}
+	sm.avatarMu.Lock()
+	if sm.avatarCache == nil {
+		sm.avatarCache = make(map[string]avatarEntry)
+	}
+	if e, ok := sm.avatarCache[key]; ok {
+		sm.avatarMu.Unlock()
+		return e.data, e.mime, e.err
+	}
+	sm.avatarMu.Unlock()
+
+	data, mimeType, err := sm.fetchAvatar(chatID, preview)
+
+	sm.avatarMu.Lock()
+	sm.avatarCache[key] = avatarEntry{data: data, mime: mimeType, err: err}
+	sm.avatarMu.Unlock()
+	return data, mimeType, err
+}
+
+func (sm *SessionManager) fetchAvatar(chatID string, preview bool) ([]byte, string, error) {
+	if sm.client == nil || !sm.client.IsConnected() {
+		return nil, "", errors.New("not connected to WhatsApp")
+	}
+	jid, err := types.ParseJID(chatID)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid JID: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	info, err := sm.client.GetProfilePictureInfo(ctx, jid, &whatsmeow.GetProfilePictureParams{Preview: preview})
+	if err != nil {
+		if errors.Is(err, whatsmeow.ErrProfilePictureNotSet) || errors.Is(err, whatsmeow.ErrProfilePictureUnauthorized) {
+			return nil, "", ErrNoAvatar
+		}
+		return nil, "", err
+	}
+	if info == nil || info.URL == "" {
+		return nil, "", ErrNoAvatar
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, info.URL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("avatar download failed: %s", resp.Status)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "image/jpeg"
+	}
+	return data, mimeType, nil
 }
 
 func (sm *SessionManager) downloadCommand(params []string, preview, show bool) {
@@ -1754,7 +1990,10 @@ func (sm *SessionManager) outgoingMessageFromSendResponse(resp whatsmeow.SendRes
 		Kind:         kind,
 		MimeType:     mimeType,
 		FileName:     fileName,
-		RawMessage:   raw,
+		// SendMessage returned, so the server has ack'd it: one grey check.
+		// Delivered/read upgrades arrive later as receipts.
+		Status:     MessageStatusSent,
+		RawMessage: raw,
 	}
 }
 
@@ -1796,13 +2035,19 @@ func (eh *eventHandler) Handle(evt interface{}) {
 	case *events.MarkChatAsRead:
 		chatJID := eh.resolveLID(v.JID)
 		chatID := chatJID.String()
+		if os.Getenv("WHATSCLI_UNREAD_PROBE") != "" {
+			fmt.Fprintf(os.Stdout, "[markread] chat=%s read=%v cutoff=%d fromFullSync=%v\n",
+				chatID, v.Action.GetRead(), markReadCutoff(v), v.FromFullSync)
+		}
 		if v.Action.GetRead() {
-			eh.sm.db.MarkChatRead(chatID)
+			// Clear only up to the action's timestamp: during a full app-state
+			// replay we see week-old read actions for chats that have since
+			// received new (still unread) messages.
+			eh.sm.db.MarkChatReadUpTo(chatID, markReadCutoff(v))
 		} else {
 			eh.sm.db.SetChatUnreadCount(chatID, 1)
 		}
-		eh.sm.uiHandler.SetChats(eh.sm.db.GetChatIds())
-		eh.sm.db.SaveChatCache()
+		eh.sm.scheduleChatRefresh()
 	case *events.Receipt:
 		eh.handleReceipt(v)
 	case *events.OfflineSyncCompleted:
@@ -1813,18 +2058,115 @@ func (eh *eventHandler) Handle(evt interface{}) {
 }
 
 func (eh *eventHandler) handleReceipt(evt *events.Receipt) {
-	if evt.Type != types.ReceiptTypeReadSelf && evt.Type != types.ReceiptTypeRead {
-		return
-	}
-
 	chatJID := eh.resolveLID(evt.Chat)
 	chatID := chatJID.String()
 
-	if evt.Type == types.ReceiptTypeReadSelf {
-		eh.sm.db.MarkChatRead(chatID)
-		eh.sm.uiHandler.SetChats(eh.sm.db.GetChatIds())
-		eh.sm.db.SaveChatCache()
+	if os.Getenv("WHATSCLI_UNREAD_PROBE") != "" {
+		fmt.Fprintf(os.Stdout, "[receipt] type=%q chat=%s sender=%s ids=%v ts=%s\n",
+			evt.Type, chatID, evt.Sender, evt.MessageIDs, evt.Timestamp.Format("15:04:05"))
 	}
+
+	// Our own devices now send receipts from our LID identity, and whatsmeow
+	// only maps PN-sender receipts to "read-self" — so a chat read on the
+	// phone arrives here as a plain "read" from our own LID. Without this
+	// check that read is mistaken for a PEER reading our messages, and the
+	// unread badge never clears (observed live: sender=<own-lid>:25@lid).
+	isSelf := false
+	if eh.sm.client != nil && eh.sm.client.Store != nil {
+		if own := eh.sm.client.Store.ID; own != nil && evt.Sender.User == own.User {
+			isSelf = true
+		}
+		if ownLID := eh.sm.client.Store.LID; !ownLID.IsEmpty() && evt.Sender.User == ownLID.User {
+			isSelf = true
+		}
+	}
+	effectiveType := evt.Type
+	if isSelf && evt.Type == types.ReceiptTypeRead {
+		effectiveType = types.ReceiptTypeReadSelf
+	}
+
+	switch effectiveType {
+	case types.ReceiptTypeDelivered:
+		if isSelf {
+			// Our own device ack — says nothing about the recipient.
+			return
+		}
+		// The recipient's device has the message: two grey checks.
+		eh.applyStatusUpgrade(chatID, evt.MessageIDs, MessageStatusDelivered)
+		return
+	case types.ReceiptTypeRead:
+		// The recipient read it: two blue checks. In groups any member's
+		// read receipt flips the ticks — simpler than tracking the full
+		// member matrix, and right for the 1:1 chats that matter most.
+		eh.applyStatusUpgrade(chatID, evt.MessageIDs, MessageStatusRead)
+		return
+	case types.ReceiptTypeReadSelf:
+		break
+	default:
+		return
+	}
+
+	if effectiveType == types.ReceiptTypeReadSelf {
+		// Read on the phone (or another linked device). Clear everything up
+		// to the receipt time; anything newer genuinely hasn't been seen.
+		cutoff := int64(0)
+		if !evt.Timestamp.IsZero() {
+			cutoff = evt.Timestamp.Unix()
+		}
+		eh.sm.db.MarkChatReadUpTo(chatID, cutoff)
+		eh.sm.scheduleChatRefresh()
+	}
+}
+
+// applyStatusUpgrade raises tick-mark state for our own messages and tells
+// the client, skipping no-ops (receipts often repeat or arrive out of order).
+func (eh *eventHandler) applyStatusUpgrade(chatID string, messageIDs []string, status MessageStatus) {
+	changed := eh.sm.db.UpgradeMessageStatus(messageIDs, status)
+	if len(changed) == 0 {
+		return
+	}
+	eh.sm.uiHandler.MessageStatus(chatID, changed, status)
+	eh.sm.scheduleChatRefresh()
+}
+
+// markReadCutoff extracts the "read up to" moment from a MarkChatAsRead
+// action as Unix seconds. The action's message range is most precise; some
+// clients send it in milliseconds, so normalize. Falls back to the event
+// timestamp, then to 0 (= clear everything).
+func markReadCutoff(v *events.MarkChatAsRead) int64 {
+	ts := v.Action.GetMessageRange().GetLastMessageTimestamp()
+	if ts > 1_000_000_000_000 {
+		ts /= 1000
+	}
+	if ts == 0 && !v.Timestamp.IsZero() {
+		ts = v.Timestamp.Unix()
+	}
+	return ts
+}
+
+// scheduleChatRefresh pushes the chat list to the UI and persists both caches
+// after a short delay, coalescing event bursts. A full app-state resync emits
+// one MarkChatAsRead per chat — hundreds of events — and SaveMessageCache
+// rewrites the whole cache file, so doing this per-event would hammer the
+// disk and flood the client with chat-list updates.
+func (sm *SessionManager) scheduleChatRefresh() {
+	sm.chatRefreshMu.Lock()
+	defer sm.chatRefreshMu.Unlock()
+	if sm.chatRefreshTimer != nil {
+		// A flush is already pending and will pick this change up too. Not
+		// resetting the timer makes this a throttle, not a debounce: during
+		// a continuous event stream (initial pairing) the UI still gets a
+		// refresh every 400ms instead of starving until the stream ends.
+		return
+	}
+	sm.chatRefreshTimer = time.AfterFunc(400*time.Millisecond, func() {
+		sm.chatRefreshMu.Lock()
+		sm.chatRefreshTimer = nil
+		sm.chatRefreshMu.Unlock()
+		sm.uiHandler.SetChats(sm.db.GetChatIds())
+		sm.db.SaveChatCache()
+		sm.db.SaveMessageCache()
+	})
 }
 
 func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
@@ -1846,6 +2188,13 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 
 	markUnread := !msg.FromMe && msg.ChatId != eh.sm.currentReceiver
 	isNew := eh.sm.db.AddMessage(msg, markUnread)
+	// Replying from ANY device means the user has read the chat — WhatsApp
+	// clears the badge on reply even when the read-self receipt never
+	// reaches us. Clear up to the reply's own timestamp only, so anything
+	// arriving after the reply still counts as unread.
+	if msg.FromMe {
+		eh.sm.db.MarkChatReadUpTo(msg.ChatId, int64(msg.Timestamp))
+	}
 	if msg.ChatId == eh.sm.currentReceiver {
 		if isNew {
 			eh.sm.uiHandler.NewMessage(msg)
@@ -1876,6 +2225,15 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 		return
 	}
 
+	if os.Getenv("WHATSCLI_UNREAD_PROBE") != "" {
+		fmt.Fprintf(os.Stdout, "[unread-probe] history sync type=%v conversations=%d\n",
+			evt.Data.GetSyncType(), len(evt.Data.GetConversations()))
+		for _, conv := range evt.Data.GetConversations() {
+			fmt.Fprintf(os.Stdout, "[unread-probe]   conv=%s unread=%d markedUnread=%v msgs=%d\n",
+				conv.GetID(), conv.GetUnreadCount(), conv.GetMarkedAsUnread(), len(conv.GetMessages()))
+		}
+	}
+
 	for _, conv := range evt.Data.GetConversations() {
 		chatID := conv.GetID()
 		if chatID == "" {
@@ -1889,6 +2247,11 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 		if err != nil {
 			continue
 		}
+		// On-demand responses key migrated chats by LID; fold them back onto
+		// the phone-number chat we track, or the update lands on a hidden
+		// duplicate entry.
+		chatJID = eh.resolveLID(chatJID)
+		chatID = chatJID.String()
 
 		chatName := conv.GetName()
 		if chatName == "" {
@@ -1925,16 +2288,52 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			if !ok || action != "" {
 				continue
 			}
+			if msg.FromMe {
+				msg.Status = statusFromWebInfo(webMsg.GetStatus())
+			}
 			eh.sm.db.AddMessage(msg, false)
 		}
-		eh.sm.db.UpdateChatUnread(chatID, int(conv.GetUnreadCount()))
+		if evt.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
+			// On-demand responses (startup reconciliation sweep) are only
+			// trusted for POSITIVE unread state: empirically the phone
+			// reports unread=0 for chats it never populates the field for,
+			// so zeroing here could wipe a legitimate badge. Clearing is
+			// the receipt path's job.
+			if n := int(conv.GetUnreadCount()); n > 0 {
+				eh.sm.db.SetChatUnreadCount(chatID, n)
+			} else if conv.GetMarkedAsUnread() {
+				// Manually marked unread on the phone (badge with no count).
+				eh.sm.db.SetChatUnreadCount(chatID, 1)
+			}
+		} else {
+			// Pairing-time history sync: authoritative snapshot, apply exactly.
+			eh.sm.db.UpdateChatUnread(chatID, int(conv.GetUnreadCount()))
+			if conv.GetMarkedAsUnread() && conv.GetUnreadCount() == 0 {
+				eh.sm.db.SetChatUnreadCount(chatID, 1)
+			}
+		}
 	}
 
-	eh.sm.uiHandler.SetChats(eh.sm.db.GetChatIds())
-	eh.sm.db.SaveChatCache()
-	eh.sm.db.SaveMessageCache()
+	// Coalesced: a startup reconciliation sweep delivers dozens of history
+	// syncs in a burst, and SaveMessageCache rewrites the whole cache file.
+	eh.sm.scheduleChatRefresh()
 	if eh.sm.currentReceiver != "" {
 		eh.sm.uiHandler.NewScreen(eh.sm.getMessages(eh.sm.currentReceiver))
+	}
+}
+
+// statusFromWebInfo maps a history-sync message's WebMessageInfo status to
+// our tick-mark states.
+func statusFromWebInfo(s waWeb.WebMessageInfo_Status) MessageStatus {
+	switch s {
+	case waWeb.WebMessageInfo_SERVER_ACK:
+		return MessageStatusSent
+	case waWeb.WebMessageInfo_DELIVERY_ACK:
+		return MessageStatusDelivered
+	case waWeb.WebMessageInfo_READ, waWeb.WebMessageInfo_PLAYED:
+		return MessageStatusRead
+	default:
+		return MessageStatusSent
 	}
 }
 
@@ -1979,6 +2378,11 @@ func (eh *eventHandler) messageFromInfo(info types.MessageInfo, raw *waProto.Mes
 		Timestamp:    uint64(info.Timestamp.Unix()),
 		FromMe:       info.IsFromMe,
 		RawMessage:   raw,
+	}
+	if info.IsFromMe {
+		// Live echo of our own message (from this or another device) —
+		// the server clearly has it. Receipts upgrade from here.
+		msg.Status = MessageStatusSent
 	}
 
 	switch {

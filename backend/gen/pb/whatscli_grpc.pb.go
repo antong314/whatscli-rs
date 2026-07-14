@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	WhatsCLI_EventStream_FullMethodName = "/whatscli.WhatsCLI/EventStream"
 	WhatsCLI_GetMedia_FullMethodName    = "/whatscli.WhatsCLI/GetMedia"
+	WhatsCLI_GetAvatar_FullMethodName   = "/whatscli.WhatsCLI/GetAvatar"
 	WhatsCLI_Login_FullMethodName       = "/whatscli.WhatsCLI/Login"
 )
 
@@ -34,6 +35,10 @@ type WhatsCLIClient interface {
 	// Stream media bytes for a given message. Separated from Connect to avoid
 	// blocking the main event stream with large payloads.
 	GetMedia(ctx context.Context, in *MediaRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[MediaChunk], error)
+	// Fetch a chat's profile picture (contact photo or group icon). Returns
+	// NOT_FOUND when the chat has no picture or it isn't visible to this
+	// account. Avatars are small, so this is unary rather than streamed.
+	GetAvatar(ctx context.Context, in *AvatarRequest, opts ...grpc.CallOption) (*AvatarResponse, error)
 	// QR-code login flow. Server streams QR updates until the device is paired
 	// or the timeout expires.
 	Login(ctx context.Context, in *LoginRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LoginEvent], error)
@@ -79,6 +84,16 @@ func (c *whatsCLIClient) GetMedia(ctx context.Context, in *MediaRequest, opts ..
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type WhatsCLI_GetMediaClient = grpc.ServerStreamingClient[MediaChunk]
 
+func (c *whatsCLIClient) GetAvatar(ctx context.Context, in *AvatarRequest, opts ...grpc.CallOption) (*AvatarResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AvatarResponse)
+	err := c.cc.Invoke(ctx, WhatsCLI_GetAvatar_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *whatsCLIClient) Login(ctx context.Context, in *LoginRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LoginEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &WhatsCLI_ServiceDesc.Streams[2], WhatsCLI_Login_FullMethodName, cOpts...)
@@ -108,6 +123,10 @@ type WhatsCLIServer interface {
 	// Stream media bytes for a given message. Separated from Connect to avoid
 	// blocking the main event stream with large payloads.
 	GetMedia(*MediaRequest, grpc.ServerStreamingServer[MediaChunk]) error
+	// Fetch a chat's profile picture (contact photo or group icon). Returns
+	// NOT_FOUND when the chat has no picture or it isn't visible to this
+	// account. Avatars are small, so this is unary rather than streamed.
+	GetAvatar(context.Context, *AvatarRequest) (*AvatarResponse, error)
 	// QR-code login flow. Server streams QR updates until the device is paired
 	// or the timeout expires.
 	Login(*LoginRequest, grpc.ServerStreamingServer[LoginEvent]) error
@@ -126,6 +145,9 @@ func (UnimplementedWhatsCLIServer) EventStream(grpc.BidiStreamingServer[ClientMe
 }
 func (UnimplementedWhatsCLIServer) GetMedia(*MediaRequest, grpc.ServerStreamingServer[MediaChunk]) error {
 	return status.Error(codes.Unimplemented, "method GetMedia not implemented")
+}
+func (UnimplementedWhatsCLIServer) GetAvatar(context.Context, *AvatarRequest) (*AvatarResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAvatar not implemented")
 }
 func (UnimplementedWhatsCLIServer) Login(*LoginRequest, grpc.ServerStreamingServer[LoginEvent]) error {
 	return status.Error(codes.Unimplemented, "method Login not implemented")
@@ -169,6 +191,24 @@ func _WhatsCLI_GetMedia_Handler(srv interface{}, stream grpc.ServerStream) error
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type WhatsCLI_GetMediaServer = grpc.ServerStreamingServer[MediaChunk]
 
+func _WhatsCLI_GetAvatar_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AvatarRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WhatsCLIServer).GetAvatar(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WhatsCLI_GetAvatar_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WhatsCLIServer).GetAvatar(ctx, req.(*AvatarRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _WhatsCLI_Login_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(LoginRequest)
 	if err := stream.RecvMsg(m); err != nil {
@@ -186,7 +226,12 @@ type WhatsCLI_LoginServer = grpc.ServerStreamingServer[LoginEvent]
 var WhatsCLI_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "whatscli.WhatsCLI",
 	HandlerType: (*WhatsCLIServer)(nil),
-	Methods:     []grpc.MethodDesc{},
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetAvatar",
+			Handler:    _WhatsCLI_GetAvatar_Handler,
+		},
+	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "EventStream",

@@ -28,6 +28,9 @@ type UiMessageHandler interface {
 	// info text continue to work for any consumer that only watches
 	// PrintFile.
 	FileSaved(messageID, path string)
+	// MessageStatus reports delivery/read upgrades for our own messages
+	// (WhatsApp tick marks). The legacy tview UI ignores it.
+	MessageStatus(chatID string, messageIDs []string, status MessageStatus)
 	SetStatus(SessionStatus)
 	OpenFile(string)
 	GetWriter() io.Writer
@@ -99,6 +102,34 @@ const (
 	MessageKindUnknown  MessageKind = "unknown"
 )
 
+// MessageStatus is the send/delivery state of an OUTGOING message — the
+// WhatsApp tick marks. Empty for incoming messages. States only ever
+// upgrade (pending → sent → delivered → read); receipts can arrive out of
+// order, so use statusRank before overwriting.
+type MessageStatus string
+
+const (
+	MessageStatusPending   MessageStatus = "pending"   // clock
+	MessageStatusSent      MessageStatus = "sent"      // one grey check
+	MessageStatusDelivered MessageStatus = "delivered" // two grey checks
+	MessageStatusRead      MessageStatus = "read"      // two blue checks
+)
+
+func statusRank(s MessageStatus) int {
+	switch s {
+	case MessageStatusPending:
+		return 1
+	case MessageStatusSent:
+		return 2
+	case MessageStatusDelivered:
+		return 3
+	case MessageStatusRead:
+		return 4
+	default:
+		return 0
+	}
+}
+
 // internal message representation to abstract from message lib
 type Message struct {
 	Id           string
@@ -115,6 +146,7 @@ type Message struct {
 	MimeType     string
 	FileName     string
 	Unread       bool
+	Status       MessageStatus
 	RawMessage   *waProto.Message
 }
 

@@ -63,10 +63,16 @@ func (md *MessageDatabase) AddMessage(msg Message, markUnread bool) bool {
 		if existing.MimeType == "" && msg.MimeType != "" {
 			existing.MimeType = msg.MimeType
 		}
+		if statusRank(msg.Status) > statusRank(existing.Status) {
+			existing.Status = msg.Status
+		}
+		// Only bump the chat counter on a false→true transition: re-delivered
+		// messages (offline sync, cache reload) must not count twice.
+		newlyUnread := markUnread && !existing.Unread
 		existing.Unread = existing.Unread || markUnread
 		md.messagesById[msg.Id] = existing
 		md.replaceMessageLocked(existing)
-		md.updateChatFromMessageLocked(existing, markUnread)
+		md.updateChatFromMessageLocked(existing, newlyUnread)
 		return false
 	}
 
@@ -194,25 +200,34 @@ func (md *MessageDatabase) SetChatUnreadCount(chatID string, count int) {
 // RecomputeUnreadCounts recalculates chat unread counters from individual
 // message Unread flags.  Call after loading the message cache to restore
 // counts that survived across restarts.
+//
+// For chats with stored messages the flags are authoritative and the counter
+// is SET, not raised: the chat cache and the message cache both persist
+// unread state, so loading both would otherwise double the counter on every
+// restart. Chats with no stored messages keep their cached counter (e.g. a
+// count seeded from history sync for a chat whose messages we never stored).
 func (md *MessageDatabase) RecomputeUnreadCounts() {
 	md.messageLock.RLock()
 	counts := make(map[string]int)
-	for _, msgs := range md.messages {
+	for chatID, msgs := range md.messages {
+		if len(msgs) == 0 {
+			continue
+		}
+		n := 0
 		for _, msg := range msgs {
 			if msg.Unread {
-				counts[msg.ChatId]++
+				n++
 			}
 		}
+		counts[chatID] = n
 	}
 	md.messageLock.RUnlock()
 
 	md.chatLock.Lock()
 	for chatID, count := range counts {
 		if chat, ok := md.chats[chatID]; ok {
-			if count > chat.Unread {
-				chat.Unread = count
-				md.chats[chatID] = chat
-			}
+			chat.Unread = count
+			md.chats[chatID] = chat
 		}
 	}
 	md.chatLock.Unlock()
@@ -263,6 +278,77 @@ func (md *MessageDatabase) lastIncomingMessageIDsLocked(chatID string, limit int
 	return ids
 }
 
+// PruneStaleUnread drops unread flags from messages older than cutoff (Unix
+// seconds), and zeroes counters of chats with no activity since then. WhatsApp
+// only replays missed read-self receipts for a bounded window after we
+// reconnect, so a flag older than that window can never be reconciled with
+// the phone again — and the phone has almost certainly read it. Without this,
+// every long backend downtime leaves permanent phantom unread counts.
+// Call before RecomputeUnreadCounts.
+func (md *MessageDatabase) PruneStaleUnread(cutoff int64) {
+	md.messageLock.Lock()
+	for chatID, msgs := range md.messages {
+		for idx, msg := range msgs {
+			if msg.Unread && int64(msg.Timestamp) < cutoff {
+				msg.Unread = false
+				msgs[idx] = msg
+				if stored, ok := md.messagesById[msg.Id]; ok {
+					stored.Unread = false
+					md.messagesById[msg.Id] = stored
+				}
+			}
+		}
+		md.messages[chatID] = msgs
+	}
+	md.messageLock.Unlock()
+
+	md.chatLock.Lock()
+	for chatID, chat := range md.chats {
+		if chat.Unread > 0 && chat.LastMessage > 0 && chat.LastMessage < cutoff {
+			chat.Unread = 0
+			md.chats[chatID] = chat
+		}
+	}
+	md.chatLock.Unlock()
+}
+
+// MarkChatReadUpTo clears unread flags for messages at or before cutoff
+// (Unix seconds) and resets the chat counter to however many unread messages
+// remain. A cutoff of 0 clears everything. Used when the phone tells us a
+// chat was read at a specific time: messages that arrived after that moment
+// stay unread, and — unlike SetChatUnreadCount — the counter is allowed to
+// go DOWN, which is what makes phone-side reads actually converge here.
+func (md *MessageDatabase) MarkChatReadUpTo(chatID string, cutoff int64) {
+	md.messageLock.Lock()
+	defer md.messageLock.Unlock()
+
+	msgs := md.messages[chatID]
+	remaining := 0
+	for idx, msg := range msgs {
+		if !msg.Unread {
+			continue
+		}
+		if cutoff == 0 || int64(msg.Timestamp) <= cutoff {
+			msg.Unread = false
+			msgs[idx] = msg
+			if stored, ok := md.messagesById[msg.Id]; ok {
+				stored.Unread = false
+				md.messagesById[msg.Id] = stored
+			}
+		} else {
+			remaining++
+		}
+	}
+	md.messages[chatID] = msgs
+
+	md.chatLock.Lock()
+	if chat, ok := md.chats[chatID]; ok {
+		chat.Unread = remaining
+		md.chats[chatID] = chat
+	}
+	md.chatLock.Unlock()
+}
+
 // MarkChatRead clears unread state for the given chat and returns the unread messages that were cleared.
 func (md *MessageDatabase) MarkChatRead(chatID string) []Message {
 	md.messageLock.Lock()
@@ -290,6 +376,27 @@ func (md *MessageDatabase) MarkChatRead(chatID string) []Message {
 	md.chatLock.Unlock()
 
 	return cleared
+}
+
+// UpgradeMessageStatus raises the delivery status of our own messages,
+// never lowering it (receipts can arrive out of order). Returns the ids
+// that actually changed so callers can skip no-op UI updates.
+func (md *MessageDatabase) UpgradeMessageStatus(messageIDs []string, status MessageStatus) []string {
+	md.messageLock.Lock()
+	defer md.messageLock.Unlock()
+
+	changed := make([]string, 0, len(messageIDs))
+	for _, id := range messageIDs {
+		msg, ok := md.messagesById[id]
+		if !ok || !msg.FromMe || statusRank(status) <= statusRank(msg.Status) {
+			continue
+		}
+		msg.Status = status
+		md.messagesById[id] = msg
+		md.replaceMessageLocked(msg)
+		changed = append(changed, id)
+	}
+	return changed
 }
 
 // MarkMessageRevoked updates a message to show that it was revoked.
@@ -335,7 +442,10 @@ func (md *MessageDatabase) GetChatIds() []Chat {
 
 	allChats := make([]Chat, 0, len(md.chats))
 	for _, chat := range md.chats {
-		if strings.HasSuffix(chat.Id, "@broadcast") || strings.HasSuffix(chat.Id, "@lid") {
+		// @newsletter chats are WhatsApp Channels — the native app shows them
+		// under Updates, never in the chat list, and they have no read-receipt
+		// flow, so their unread counts only ever grow.
+		if strings.HasSuffix(chat.Id, "@broadcast") || strings.HasSuffix(chat.Id, "@lid") || strings.HasSuffix(chat.Id, "@newsletter") {
 			continue
 		}
 		if chat.IsGroup || chat.LastMessage > 0 || len(md.messages[chat.Id]) > 0 || chat.Unread > 0 {
@@ -570,6 +680,7 @@ type messageCacheEntry struct {
 	FileName     string `json:"file,omitempty"`
 	RawProto     string `json:"raw,omitempty"`
 	Unread       bool   `json:"unread,omitempty"`
+	Status       string `json:"status,omitempty"`
 }
 
 // SaveMessageCache persists all in-memory messages to disk.
@@ -592,6 +703,7 @@ func (md *MessageDatabase) SaveMessageCache() {
 			MimeType:     msg.MimeType,
 			FileName:     msg.FileName,
 			Unread:       msg.Unread,
+			Status:       string(msg.Status),
 		}
 		if msg.RawMessage != nil {
 			if raw, err := proto.Marshal(msg.RawMessage); err == nil {
@@ -635,6 +747,7 @@ func (md *MessageDatabase) LoadMessageCache() {
 			MimeType:     entry.MimeType,
 			FileName:     entry.FileName,
 			Unread:       entry.Unread,
+			Status:       MessageStatus(entry.Status),
 		}
 		if entry.RawProto != "" {
 			if raw, err := base64.StdEncoding.DecodeString(entry.RawProto); err == nil {

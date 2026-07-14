@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/http"
+	_ "net/http/pprof" // debug endpoint, only served when WHATSCLI_PPROF is set
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -51,6 +53,12 @@ func cleanup() {
 func main() {
 	config.InitConfig()
 	translate.SuppressStderr()
+
+	// WHATSCLI_PPROF=1 serves Go pprof on localhost for diagnosing hangs:
+	// curl 'http://127.0.0.1:6161/debug/pprof/goroutine?debug=2'
+	if os.Getenv("WHATSCLI_PPROF") != "" {
+		go func() { _ = http.ListenAndServe("127.0.0.1:6161", nil) }()
+	}
 
 	broadcast := server.NewBroadcaster()
 	handler := server.NewGrpcHandler(broadcast)

@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -153,6 +155,20 @@ func (s *WhatsCLIServer) GetMedia(req *pb.MediaRequest, stream pb.WhatsCLI_GetMe
 		}
 	}
 	return nil
+}
+
+// GetAvatar returns the profile picture for a chat. Unary — avatars are a
+// few tens of KB at most. NOT_FOUND means the chat has no (visible) picture,
+// which clients should treat as "fall back to initials", not as an error.
+func (s *WhatsCLIServer) GetAvatar(ctx context.Context, req *pb.AvatarRequest) (*pb.AvatarResponse, error) {
+	data, mimeType, err := s.sm.GetAvatar(req.ChatId, req.Preview)
+	if err != nil {
+		if errors.Is(err, messages.ErrNoAvatar) {
+			return nil, status.Errorf(codes.NotFound, "no avatar for %s", req.ChatId)
+		}
+		return nil, status.Errorf(codes.Internal, "avatar fetch failed: %v", err)
+	}
+	return &pb.AvatarResponse{Data: data, MimeType: mimeType}, nil
 }
 
 // Login handles the QR code login flow.

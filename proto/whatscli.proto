@@ -13,6 +13,11 @@ service WhatsCLI {
   // blocking the main event stream with large payloads.
   rpc GetMedia(MediaRequest) returns (stream MediaChunk);
 
+  // Fetch a chat's profile picture (contact photo or group icon). Returns
+  // NOT_FOUND when the chat has no picture or it isn't visible to this
+  // account. Avatars are small, so this is unary rather than streamed.
+  rpc GetAvatar(AvatarRequest) returns (AvatarResponse);
+
   // QR-code login flow. Server streams QR updates until the device is paired
   // or the timeout expires.
   rpc Login(LoginRequest) returns (stream LoginEvent);
@@ -202,7 +207,15 @@ message ServerEvent {
     OpenFileRequest open_file = 10;
     ModelProgress model_progress = 11;
     ColorList color_list = 12;
+    MessageStatusUpdate message_status = 13;
   }
+}
+
+// Delivery/read state changed for our own messages (receipt arrived).
+message MessageStatusUpdate {
+  string chat_id = 1;
+  repeated string message_ids = 2;
+  MessageStatus status = 3;
 }
 
 message ChatList {
@@ -277,6 +290,18 @@ message MediaChunk {
   int64 total_size = 3;
 }
 
+message AvatarRequest {
+  string chat_id = 1;
+  // Request the small (~96px) preview variant instead of the full-size
+  // picture. Plenty for list rows and headers, and much cheaper.
+  bool preview = 2;
+}
+
+message AvatarResponse {
+  bytes data = 1;
+  string mime_type = 2;
+}
+
 // ---------------------------------------------------------------------------
 // Login flow
 // ---------------------------------------------------------------------------
@@ -316,6 +341,15 @@ enum MessageKind {
   UNKNOWN = 5;
 }
 
+// Send/delivery state of an outgoing message (WhatsApp tick marks).
+enum MessageStatus {
+  MESSAGE_STATUS_UNKNOWN = 0; // incoming messages / no data
+  MESSAGE_STATUS_PENDING = 1; // not yet accepted by the server (clock)
+  MESSAGE_STATUS_SENT = 2;      // one grey check
+  MESSAGE_STATUS_DELIVERED = 3; // two grey checks
+  MESSAGE_STATUS_READ = 4;      // two blue checks
+}
+
 message ChatProto {
   string id = 1;
   bool is_group = 2;
@@ -341,4 +375,5 @@ message MessageProto {
   string mime_type = 12;
   string file_name = 13;
   bool unread = 14;
+  MessageStatus status = 15;
 }

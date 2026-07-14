@@ -1257,6 +1257,9 @@ func (u UiHandler) SetStatus(status messages.SessionStatus) {
 	})
 }
 
+// MessageStatus (tick marks) is not rendered by the legacy tview UI.
+func (u UiHandler) MessageStatus(chatID string, messageIDs []string, status messages.MessageStatus) {}
+
 func (u UiHandler) GetWriter() io.Writer {
 	return textView
 }
