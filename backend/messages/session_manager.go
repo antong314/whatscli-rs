@@ -15,11 +15,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gen2brain/beeep"
-	_ "github.com/mattn/go-sqlite3" // SQLite driver
 	"github.com/antong314/whatscli-rs/backend/config"
 	"github.com/antong314/whatscli-rs/backend/transcribe"
 	"github.com/antong314/whatscli-rs/backend/translate"
+	"github.com/gen2brain/beeep"
+	_ "github.com/mattn/go-sqlite3" // SQLite driver
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
@@ -85,6 +85,10 @@ type SessionManager struct {
 	// single chat-list push and cache save instead of hundreds.
 	chatRefreshMu    sync.Mutex
 	chatRefreshTimer *time.Timer
+
+	// userDisconnected is set when the user explicitly disconnects, so the
+	// connection watchdog doesn't fight their intent by reconnecting.
+	userDisconnected bool
 }
 
 // avatarEntry is one cached profile-picture lookup. err is non-nil for
@@ -161,7 +165,33 @@ func (sm *SessionManager) StartManager() error {
 	}
 	sm.started = true
 	go sm.runManager()
+	go sm.connectionWatchdog()
 	return nil
+}
+
+// connectionWatchdog reconnects a paired session whose socket has silently
+// died. Observed in the wild: after days of sleep/wake cycles the WhatsApp
+// socket can drop without whatsmeow's auto-reconnect ever firing — the
+// process sits with zero TCP connections while the UI still says
+// "Connected", and no new messages arrive until a manual restart. The
+// watchdog turns that permanent stall into at most a one-minute gap; the
+// server's offline queue then delivers whatever was missed.
+func (sm *SessionManager) connectionWatchdog() {
+	for range time.Tick(time.Minute) {
+		c := sm.client
+		if c == nil || sm.userDisconnected || c.IsConnected() {
+			continue
+		}
+		if c.Store == nil || c.Store.ID == nil {
+			continue // not paired — the QR flow owns connecting
+		}
+		// Tell the UI the truth before trying to repair it.
+		sm.StatusChannel <- StatusMsg{false, nil}
+		sm.uiHandler.PrintText("Connection to WhatsApp lost — reconnecting…")
+		if err := c.Connect(); err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
+			sm.uiHandler.PrintError(fmt.Errorf("reconnect failed (will retry): %v", err))
+		}
+	}
 }
 
 func (sm *SessionManager) runManager() error {
@@ -303,6 +333,36 @@ func (sm *SessionManager) cancelPendingAutoMarkRead() {
 		sm.markReadTimer = nil
 		sm.markReadTimerChat = ""
 	}
+}
+
+// hasPendingMarkRead reports whether chatID is still inside its PROBE dwell
+// window (auto-mark-read timer armed but not yet fired).
+func (sm *SessionManager) hasPendingMarkRead(chatID string) bool {
+	sm.markReadMu.Lock()
+	defer sm.markReadMu.Unlock()
+	return sm.markReadTimer != nil && sm.markReadTimerChat == chatID
+}
+
+// sendReadReceipt tells WhatsApp — and thereby the phone — that one incoming
+// message has been read. Needed for messages that arrive while their chat is
+// already open: they never get a local unread flag, so autoMarkRead's batch
+// path never sees them, and without a receipt the phone keeps showing a
+// badge for a conversation the user is actively looking at.
+func (sm *SessionManager) sendReadReceipt(msg Message) {
+	if sm.client == nil || !sm.client.IsConnected() {
+		return
+	}
+	chatJID, err := types.ParseJID(msg.ChatId)
+	if err != nil {
+		return
+	}
+	sender := chatJID
+	if strings.Contains(msg.ChatId, GROUPSUFFIX) && msg.SenderId != "" {
+		if s, e := types.ParseJID(msg.SenderId); e == nil {
+			sender = s
+		}
+	}
+	_ = sm.client.MarkRead(context.Background(), []types.MessageID{types.MessageID(msg.Id)}, time.Now(), chatJID, sender)
 }
 
 // autoMarkRead marks the current chat as read both locally and on WhatsApp,
@@ -732,6 +792,7 @@ func (sm *SessionManager) getChatName(jid types.JID) string {
 }
 
 func (sm *SessionManager) disconnect() error {
+	sm.userDisconnected = true
 	if sm.client != nil && sm.client.IsConnected() {
 		sm.client.Disconnect()
 		sm.StatusChannel <- StatusMsg{false, nil}
@@ -765,6 +826,7 @@ func (sm *SessionManager) execCommand(command Command) {
 	case "backlog":
 		sm.loadBacklog()
 	case "login", "connect":
+		sm.userDisconnected = false
 		err := sm.login()
 		if err != nil {
 			sm.uiHandler.PrintError(fmt.Errorf("WhatsApp connection failed: %v", err))
@@ -1873,7 +1935,6 @@ func lastIncomingNonTrivialOf(msgs []Message) string {
 	return ""
 }
 
-
 func (sm *SessionManager) sendMedia(chatID, path string, kind MessageKind) error {
 	if sm.client == nil || !sm.client.IsConnected() {
 		return errors.New("not connected to WhatsApp")
@@ -2186,7 +2247,11 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 		return
 	}
 
-	markUnread := !msg.FromMe && msg.ChatId != eh.sm.currentReceiver
+	// A message landing in the open chat is normally read on the spot — but
+	// if the user only just arrowed onto the chat (dwell timer still armed),
+	// flag it unread so the timer's batch decides, same as the rest.
+	inDwell := eh.sm.hasPendingMarkRead(msg.ChatId)
+	markUnread := !msg.FromMe && (msg.ChatId != eh.sm.currentReceiver || inDwell)
 	isNew := eh.sm.db.AddMessage(msg, markUnread)
 	// Replying from ANY device means the user has read the chat — WhatsApp
 	// clears the badge on reply even when the read-self receipt never
@@ -2194,6 +2259,12 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 	// arriving after the reply still counts as unread.
 	if msg.FromMe {
 		eh.sm.db.MarkChatReadUpTo(msg.ChatId, int64(msg.Timestamp))
+	}
+	// Read receipt for an arrival in the settled current chat — this is
+	// what clears the PHONE's badge (and gives the sender blue ticks); the
+	// local database never flags it, so no other path will send one.
+	if isNew && !markUnread && !msg.FromMe {
+		go eh.sm.sendReadReceipt(msg)
 	}
 	if msg.ChatId == eh.sm.currentReceiver {
 		if isNew {
@@ -2294,17 +2365,19 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			eh.sm.db.AddMessage(msg, false)
 		}
 		if evt.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
-			// On-demand responses (startup reconciliation sweep) are only
-			// trusted for POSITIVE unread state: empirically the phone
-			// reports unread=0 for chats it never populates the field for,
-			// so zeroing here could wipe a legitimate badge. Clearing is
-			// the receipt path's job.
-			if n := int(conv.GetUnreadCount()); n > 0 {
-				eh.sm.db.SetChatUnreadCount(chatID, n)
-			} else if conv.GetMarkedAsUnread() {
-				// Manually marked unread on the phone (badge with no count).
-				eh.sm.db.SetChatUnreadCount(chatID, 1)
+			// This conversation came from an explicit per-chat request to the
+			// primary phone, so its state is authoritative — including zero.
+			// Ignoring zero made the local counter a one-way ratchet: a chat
+			// read on the phone while this client was offline stayed unread
+			// forever unless a read receipt happened to be replayed later.
+			n := int(conv.GetUnreadCount())
+			if conv.GetMarkedAsUnread() && n == 0 {
+				// WhatsApp represents a manual "mark unread" separately from
+				// unread message count. The current client model uses one badge
+				// for both states, so preserve that marker as a count of one.
+				n = 1
 			}
+			eh.sm.db.UpdateChatUnread(chatID, n)
 		} else {
 			// Pairing-time history sync: authoritative snapshot, apply exactly.
 			eh.sm.db.UpdateChatUnread(chatID, int(conv.GetUnreadCount()))

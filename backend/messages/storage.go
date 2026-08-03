@@ -17,17 +17,17 @@ import (
 
 // MessageDatabase stores messages and contact data.
 type MessageDatabase struct {
-	messages     map[string][]Message
-	messagesById map[string]Message
-	chats        map[string]Chat
-	contacts     map[string]Contact
-	translations    map[string]string
-	transcriptions  map[string]string
+	messages       map[string][]Message
+	messagesById   map[string]Message
+	chats          map[string]Chat
+	contacts       map[string]Contact
+	translations   map[string]string
+	transcriptions map[string]string
 
-	contactLock      sync.RWMutex
-	chatLock         sync.RWMutex
-	messageLock      sync.RWMutex
-	translationLock  sync.RWMutex
+	contactLock       sync.RWMutex
+	chatLock          sync.RWMutex
+	messageLock       sync.RWMutex
+	translationLock   sync.RWMutex
 	transcriptionLock sync.RWMutex
 }
 
@@ -455,8 +455,6 @@ func (md *MessageDatabase) GetChatIds() []Chat {
 				if newest > c.LastMessage {
 					c.LastMessage = newest
 				}
-			} else if !chat.IsGroup {
-				c.LastMessage = 0
 			}
 			allChats = append(allChats, c)
 		}

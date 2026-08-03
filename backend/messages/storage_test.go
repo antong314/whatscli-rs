@@ -168,6 +168,29 @@ func TestMarkChatReadUpToLowersPhantomCounter(t *testing.T) {
 	}
 }
 
+func TestAuthoritativeUnreadZeroClearsCachedState(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+
+	chat := "a@s.whatsapp.net"
+	db.AddMessage(Message{Id: "m1", ChatId: chat, ContactName: "A", Timestamp: 100, Text: "hi", Kind: MessageKindText}, true)
+	if got := unreadOf(t, db, chat); got != 1 {
+		t.Fatalf("expected unread fixture to start at 1, got %d", got)
+	}
+
+	// An on-demand history response from the primary phone with unread=0
+	// must lower both the chat count and cached message flags. This is the
+	// convergence path for reads performed while the desktop was offline.
+	db.UpdateChatUnread(chat, 0)
+
+	if got := unreadOf(t, db, chat); got != 0 {
+		t.Errorf("expected authoritative zero to clear chat count, got %d", got)
+	}
+	if msg, _ := db.GetMessage("m1"); msg.Unread {
+		t.Error("expected authoritative zero to clear cached message flag")
+	}
+}
+
 func TestGetChatIdsFiltersNewsletters(t *testing.T) {
 	db := &MessageDatabase{}
 	db.Init()

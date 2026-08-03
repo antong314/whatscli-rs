@@ -53,12 +53,14 @@ func cleanup() {
 func main() {
 	config.InitConfig()
 	translate.SuppressStderr()
+	// Must happen before any timers matter — see appnap_darwin.go.
+	disableAppNap()
 
-	// WHATSCLI_PPROF=1 serves Go pprof on localhost for diagnosing hangs:
-	// curl 'http://127.0.0.1:6161/debug/pprof/goroutine?debug=2'
-	if os.Getenv("WHATSCLI_PPROF") != "" {
-		go func() { _ = http.ListenAndServe("127.0.0.1:6161", nil) }()
-	}
+	// Always serve Go pprof on localhost for diagnosing hangs and stalls —
+	// the supervisor discards our output, so this is the only live window
+	// into the process: curl 'http://127.0.0.1:6161/debug/pprof/goroutine?debug=2'
+	// (Fails silently if the port is taken, e.g. a second backend.)
+	go func() { _ = http.ListenAndServe("127.0.0.1:6161", nil) }()
 
 	broadcast := server.NewBroadcaster()
 	handler := server.NewGrpcHandler(broadcast)
