@@ -7,6 +7,7 @@ import (
 
 	pb "github.com/antong314/whatscli-rs/backend/gen/pb"
 	"github.com/antong314/whatscli-rs/backend/messages"
+	qrcode "github.com/skip2/go-qrcode"
 	"github.com/skratchdot/open-golang/open"
 )
 
@@ -21,6 +22,7 @@ type GrpcHandler struct {
 	// data is written here instead of being broadcast.
 	loginSink   chan *pb.LoginEvent
 	loginSinkMu sync.Mutex
+	latestQR    *pb.LoginEvent
 }
 
 func NewGrpcHandler(b *Broadcaster) *GrpcHandler {
@@ -42,6 +44,9 @@ func (h *GrpcHandler) SetLoginSink(ch chan *pb.LoginEvent) {
 	h.loginSinkMu.Lock()
 	defer h.loginSinkMu.Unlock()
 	h.loginSink = ch
+	if ch != nil && h.latestQR != nil {
+		ch <- h.latestQR
+	}
 }
 
 // --- UiMessageHandler implementation ---
@@ -231,18 +236,27 @@ func (h *GrpcHandler) GetViewportLines() int {
 }
 
 func (h *GrpcHandler) QRCode(code string) {
+	pngData, err := qrcode.Encode(code, qrcode.Medium, 512)
+	if err != nil {
+		log.Printf("failed to encode login QR as PNG: %v", err)
+	}
+
+	event := &pb.LoginEvent{
+		Event: &pb.LoginEvent_QrCode{
+			QrCode: &pb.QrCode{
+				PngData: pngData,
+				Text:    code,
+			},
+		},
+	}
+
 	h.loginSinkMu.Lock()
 	sink := h.loginSink
+	h.latestQR = event
 	h.loginSinkMu.Unlock()
 
 	if sink != nil {
-		sink <- &pb.LoginEvent{
-			Event: &pb.LoginEvent_QrCode{
-				QrCode: &pb.QrCode{
-					Text: code,
-				},
-			},
-		}
+		sink <- event
 	}
 }
 
@@ -359,4 +373,3 @@ func chatToProto(c messages.Chat) *pb.ChatProto {
 		Pinned:      c.Pinned,
 	}
 }
-
