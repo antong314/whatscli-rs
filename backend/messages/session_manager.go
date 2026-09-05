@@ -83,8 +83,9 @@ type SessionManager struct {
 	// chatRefreshMu guards chatRefreshTimer, which coalesces bursts of
 	// read-state events (a full app-state resync emits one per chat) into a
 	// single chat-list push and cache save instead of hundreds.
-	chatRefreshMu    sync.Mutex
-	chatRefreshTimer *time.Timer
+	chatRefreshMu          sync.Mutex
+	chatRefreshTimer       *time.Timer
+	chatRefreshPushPending bool
 
 	// userDisconnected is set when the user explicitly disconnects, so the
 	// connection watchdog doesn't fight their intent by reconnecting.
@@ -659,6 +660,8 @@ func (sm *SessionManager) syncAppState() {
 // goroutine: one peer message per chat, spaced out to be polite.
 func (sm *SessionManager) reconcileUnreadWithPhone() {
 	const maxChats = 30
+	started := time.Now()
+	fmt.Fprintf(os.Stdout, "[unread-sync] started max_chats=%d\n", maxChats)
 	requested := 0
 	for _, chat := range sm.db.GetChatIds() {
 		if requested >= maxChats {
@@ -670,6 +673,7 @@ func (sm *SessionManager) reconcileUnreadWithPhone() {
 		requested++
 		time.Sleep(300 * time.Millisecond)
 	}
+	fmt.Fprintf(os.Stdout, "[unread-sync] requests completed sent=%d duration_ms=%d\n", requested, time.Since(started).Milliseconds())
 }
 
 // requestChatHistorySync asks the primary phone for the most recent history
@@ -2211,8 +2215,17 @@ func markReadCutoff(v *events.MarkChatAsRead) int64 {
 // rewrites the whole cache file, so doing this per-event would hammer the
 // disk and flood the client with chat-list updates.
 func (sm *SessionManager) scheduleChatRefresh() {
+	sm.scheduleCacheRefresh(true)
+}
+
+// scheduleCacheRefresh persists history-sync changes while allowing callers
+// to suppress an unchanged chat-list broadcast. The pending push bit is
+// sticky across the coalescing window, so a later real chat change is never
+// hidden by an earlier cache-only request.
+func (sm *SessionManager) scheduleCacheRefresh(pushChats bool) {
 	sm.chatRefreshMu.Lock()
 	defer sm.chatRefreshMu.Unlock()
+	sm.chatRefreshPushPending = sm.chatRefreshPushPending || pushChats
 	if sm.chatRefreshTimer != nil {
 		// A flush is already pending and will pick this change up too. Not
 		// resetting the timer makes this a throttle, not a debounce: during
@@ -2222,11 +2235,18 @@ func (sm *SessionManager) scheduleChatRefresh() {
 	}
 	sm.chatRefreshTimer = time.AfterFunc(400*time.Millisecond, func() {
 		sm.chatRefreshMu.Lock()
+		shouldPushChats := sm.chatRefreshPushPending
+		sm.chatRefreshPushPending = false
 		sm.chatRefreshTimer = nil
 		sm.chatRefreshMu.Unlock()
-		sm.uiHandler.SetChats(sm.db.GetChatIds())
+		started := time.Now()
+		fmt.Fprintf(os.Stdout, "[cache-refresh] started push_chats=%t\n", shouldPushChats)
+		if shouldPushChats {
+			sm.uiHandler.SetChats(sm.db.GetChatIds())
+		}
 		sm.db.SaveChatCache()
 		sm.db.SaveMessageCache()
+		fmt.Fprintf(os.Stdout, "[cache-refresh] completed push_chats=%t duration_ms=%d\n", shouldPushChats, time.Since(started).Milliseconds())
 	})
 }
 
@@ -2295,6 +2315,19 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 	if evt == nil || evt.Data == nil {
 		return
 	}
+	started := time.Now()
+	currentReceiver := eh.sm.currentReceiver
+	currentBefore := eh.sm.getMessages(currentReceiver)
+	chatsBefore := eh.sm.db.GetChatIds()
+	currentConversationIncluded := false
+	addedMessages := 0
+	fmt.Fprintf(
+		os.Stdout,
+		"[history-sync] started type=%s conversations=%d current_open=%t\n",
+		evt.Data.GetSyncType().String(),
+		len(evt.Data.GetConversations()),
+		currentReceiver != "",
+	)
 
 	if os.Getenv("WHATSCLI_UNREAD_PROBE") != "" {
 		fmt.Fprintf(os.Stdout, "[unread-probe] history sync type=%v conversations=%d\n",
@@ -2323,6 +2356,9 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 		// duplicate entry.
 		chatJID = eh.resolveLID(chatJID)
 		chatID = chatJID.String()
+		if chatID == currentReceiver {
+			currentConversationIncluded = true
+		}
 
 		chatName := conv.GetName()
 		if chatName == "" {
@@ -2362,7 +2398,9 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			if msg.FromMe {
 				msg.Status = statusFromWebInfo(webMsg.GetStatus())
 			}
-			eh.sm.db.AddMessage(msg, false)
+			if eh.sm.db.AddMessage(msg, false) {
+				addedMessages++
+			}
 		}
 		if evt.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
 			// This conversation came from an explicit per-chat request to the
@@ -2387,12 +2425,66 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 		}
 	}
 
+	currentAfter := eh.sm.getMessages(currentReceiver)
+	chatsAfter := eh.sm.db.GetChatIds()
+	currentChanged := currentConversationIncluded && !messageScreensEqual(currentBefore, currentAfter)
+	chatsChanged := !chatScreensEqual(chatsBefore, chatsAfter)
+
 	// Coalesced: a startup reconciliation sweep delivers dozens of history
 	// syncs in a burst, and SaveMessageCache rewrites the whole cache file.
-	eh.sm.scheduleChatRefresh()
-	if eh.sm.currentReceiver != "" {
-		eh.sm.uiHandler.NewScreen(eh.sm.getMessages(eh.sm.currentReceiver))
+	// Persist every response, but only broadcast the 1,000+ row chat list when
+	// its visible state changed. Likewise, never republish the open thread for
+	// a response belonging to one of the other chats in the sweep.
+	eh.sm.scheduleCacheRefresh(chatsChanged)
+	currentScreenPushed := currentChanged && eh.sm.currentReceiver == currentReceiver
+	if currentScreenPushed {
+		eh.sm.uiHandler.NewScreen(currentAfter)
 	}
+	fmt.Fprintf(
+		os.Stdout,
+		"[history-sync] completed type=%s conversations=%d added_messages=%d chats_changed=%t current_included=%t current_changed=%t screen_pushed=%t duration_ms=%d\n",
+		evt.Data.GetSyncType().String(),
+		len(evt.Data.GetConversations()),
+		addedMessages,
+		chatsChanged,
+		currentConversationIncluded,
+		currentChanged,
+		currentScreenPushed,
+		time.Since(started).Milliseconds(),
+	)
+}
+
+// messageScreensEqual compares exactly the fields sent to the GUI. RawMessage
+// is intentionally excluded: it is backend-only media/protocol data and a
+// pointer change must not trigger a full SwiftUI conversation rebuild.
+func messageScreensEqual(a, b []Message) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		x, y := a[i], b[i]
+		if x.Id != y.Id || x.ChatId != y.ChatId || x.SenderId != y.SenderId ||
+			x.ContactId != y.ContactId || x.ContactName != y.ContactName ||
+			x.ContactShort != y.ContactShort || x.Timestamp != y.Timestamp ||
+			x.FromMe != y.FromMe || x.Forwarded != y.Forwarded || x.Text != y.Text ||
+			x.Kind != y.Kind || x.MimeType != y.MimeType || x.FileName != y.FileName ||
+			x.Unread != y.Unread || x.Status != y.Status {
+			return false
+		}
+	}
+	return true
+}
+
+func chatScreensEqual(a, b []Chat) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // statusFromWebInfo maps a history-sync message's WebMessageInfo status to

@@ -3,6 +3,7 @@ package messages
 import (
 	"testing"
 
+	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -42,6 +43,31 @@ func TestContactForMessageKeepsSavedNameAheadOfPushName(t *testing.T) {
 
 	if name != "Saved Alex" || short != "Alex" {
 		t.Fatalf("saved contact must win, got name=%q short=%q", name, short)
+	}
+}
+
+func TestMessageScreensEqualIgnoresRawMessagePointer(t *testing.T) {
+	a := []Message{{Id: "m1", ChatId: "chat", Text: "hello", Kind: MessageKindText, RawMessage: &waProto.Message{}}}
+	b := []Message{{Id: "m1", ChatId: "chat", Text: "hello", Kind: MessageKindText, RawMessage: &waProto.Message{}}}
+
+	if !messageScreensEqual(a, b) {
+		t.Fatal("backend-only raw message pointers must not cause a GUI refresh")
+	}
+	b[0].ContactName = "New push name"
+	if messageScreensEqual(a, b) {
+		t.Fatal("a visible sender-name upgrade must refresh the open thread")
+	}
+}
+
+func TestChatScreensEqualDetectsVisibleChanges(t *testing.T) {
+	a := []Chat{{Id: "chat", Name: "Alice", Unread: 1, LastMessage: 100}}
+	b := append([]Chat(nil), a...)
+	if !chatScreensEqual(a, b) {
+		t.Fatal("identical chat snapshots should be suppressed")
+	}
+	b[0].Unread = 0
+	if chatScreensEqual(a, b) {
+		t.Fatal("an unread-count change must refresh the chat list")
 	}
 }
 
