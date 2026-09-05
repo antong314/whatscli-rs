@@ -147,6 +147,75 @@ func TestAddMessageUpgradesCachedPhoneLabel(t *testing.T) {
 	}
 }
 
+func TestParticipantPushNameAppliesAcrossDeviceJIDs(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	chatID := "group@g.us"
+
+	// WhatsApp supplied the participant's push name on one message.
+	db.AddMessage(Message{
+		Id:           "named",
+		ChatId:       chatID,
+		SenderId:     "15054599691@s.whatsapp.net",
+		ContactId:    "15054599691@s.whatsapp.net",
+		ContactName:  "Mark Harris",
+		ContactShort: "Mark Harris",
+		Timestamp:    100,
+		Text:         "first",
+		Kind:         MessageKindText,
+	}, false)
+
+	// A later linked-device message omitted the push name and carried an AD
+	// JID. It must still resolve to the already-known participant name.
+	db.AddMessage(Message{
+		Id:           "device",
+		ChatId:       chatID,
+		SenderId:     "15054599691:25@s.whatsapp.net",
+		ContactId:    "15054599691:25@s.whatsapp.net",
+		ContactName:  "15054599691:25",
+		ContactShort: "15054599691:25",
+		Timestamp:    200,
+		Text:         "second",
+		Kind:         MessageKindText,
+	}, false)
+
+	msgs := db.GetMessages(chatID)
+	if len(msgs) != 2 {
+		t.Fatalf("expected two messages, got %d", len(msgs))
+	}
+	got := msgs[1]
+	if got.SenderId != "15054599691@s.whatsapp.net" || got.ContactId != "15054599691@s.whatsapp.net" {
+		t.Fatalf("expected canonical participant ids, got sender=%q contact=%q", got.SenderId, got.ContactId)
+	}
+	if got.ContactName != "Mark Harris" || got.ContactShort != "Mark Harris" {
+		t.Fatalf("expected shared push name, got name=%q short=%q", got.ContactName, got.ContactShort)
+	}
+}
+
+func TestLaterPushNameRepairsEarlierParticipantMessagesOnRead(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	chatID := "group@g.us"
+
+	db.AddMessage(Message{
+		Id: "fallback", ChatId: chatID,
+		SenderId: "15054599691:25@s.whatsapp.net", ContactId: "15054599691:25@s.whatsapp.net",
+		ContactName: "15054599691:25", ContactShort: "15054599691:25",
+		Timestamp: 100, Text: "first", Kind: MessageKindText,
+	}, false)
+	db.AddMessage(Message{
+		Id: "named", ChatId: chatID,
+		SenderId: "15054599691@s.whatsapp.net", ContactId: "15054599691@s.whatsapp.net",
+		ContactName: "Mark Harris", ContactShort: "Mark Harris",
+		Timestamp: 200, Text: "second", Kind: MessageKindText,
+	}, false)
+
+	msgs := db.GetMessages(chatID)
+	if msgs[0].ContactName != "Mark Harris" || msgs[0].ContactShort != "Mark Harris" {
+		t.Fatalf("expected later push name to repair earlier row, got name=%q short=%q", msgs[0].ContactName, msgs[0].ContactShort)
+	}
+}
+
 func TestRecomputeUnreadCountsIsAuthoritativeWithMessages(t *testing.T) {
 	db := &MessageDatabase{}
 	db.Init()

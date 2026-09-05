@@ -12,6 +12,7 @@ import (
 
 	"github.com/antong314/whatscli-rs/backend/config"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -43,6 +44,13 @@ func (md *MessageDatabase) Init() {
 
 // AddMessage stores a message and updates related chat state.
 func (md *MessageDatabase) AddMessage(msg Message, markUnread bool) bool {
+	// Linked-device events and older cache entries may identify a group
+	// participant as number:device@s.whatsapp.net. Contact names are keyed by
+	// the non-device JID, so normalize before lookup and storage.
+	msg.SenderId = canonicalMessageJID(msg.SenderId)
+	msg.ContactId = canonicalMessageJID(msg.ContactId)
+	md.enrichMessageContact(&msg)
+
 	md.messageLock.Lock()
 	defer md.messageLock.Unlock()
 
@@ -472,6 +480,7 @@ func (md *MessageDatabase) MarkMessageRevoked(messageID string) bool {
 
 // AddContact adds or updates a contact in the database.
 func (md *MessageDatabase) AddContact(contact Contact) {
+	contact.Id = canonicalMessageJID(contact.Id)
 	md.contactLock.Lock()
 	defer md.contactLock.Unlock()
 
@@ -531,12 +540,51 @@ func (md *MessageDatabase) GetChatIds() []Chat {
 // GetMessages returns all messages for the given chat.
 func (md *MessageDatabase) GetMessages(chatID string) []Message {
 	md.messageLock.RLock()
-	defer md.messageLock.RUnlock()
-
 	msgs := md.messages[chatID]
 	out := make([]Message, len(msgs))
 	copy(out, msgs)
+	md.messageLock.RUnlock()
+
+	// A push name learned from any message applies to every message from that
+	// participant. Resolve on read too, so a later named row immediately fixes
+	// an earlier phone-number fallback without rewriting the entire database.
+	for i := range out {
+		md.enrichMessageContact(&out[i])
+	}
 	return out
+}
+
+func canonicalMessageJID(id string) string {
+	if id == "" {
+		return ""
+	}
+	jid, err := types.ParseJID(id)
+	if err != nil {
+		return id
+	}
+	return jid.ToNonAD().String()
+}
+
+func (md *MessageDatabase) enrichMessageContact(msg *Message) {
+	if msg == nil || msg.ContactId == "" {
+		return
+	}
+	md.contactLock.RLock()
+	contact, ok := md.contacts[msg.ContactId]
+	md.contactLock.RUnlock()
+	if !ok {
+		return
+	}
+	if shouldUpgradeContactLabel(msg.ContactName, contact.Name, msg.ContactId) {
+		msg.ContactName = contact.Name
+	}
+	candidateShort := contact.Short
+	if candidateShort == "" {
+		candidateShort = contact.Name
+	}
+	if shouldUpgradeContactLabel(msg.ContactShort, candidateShort, msg.ContactId) {
+		msg.ContactShort = candidateShort
+	}
 }
 
 // GetMessage returns a single message by ID.
@@ -604,6 +652,7 @@ func (md *MessageDatabase) GetIdName(id string) string {
 	if id == "" {
 		return "Unknown"
 	}
+	id = canonicalMessageJID(id)
 
 	md.contactLock.RLock()
 	contact, ok := md.contacts[id]
@@ -632,6 +681,7 @@ func (md *MessageDatabase) GetIdShort(id string) string {
 	if id == "" {
 		return "Unknown"
 	}
+	id = canonicalMessageJID(id)
 
 	md.contactLock.RLock()
 	contact, ok := md.contacts[id]
@@ -866,6 +916,10 @@ func (md *MessageDatabase) RefreshContactNames() {
 			if msg.ContactId == "" {
 				continue
 			}
+			msg.SenderId = canonicalMessageJID(msg.SenderId)
+			msg.ContactId = canonicalMessageJID(msg.ContactId)
+			msgs[i].SenderId = msg.SenderId
+			msgs[i].ContactId = msg.ContactId
 			name, short := resolve(msg.ContactId)
 			if name != "" && name != msg.ContactId {
 				msgs[i].ContactName = name
@@ -876,6 +930,8 @@ func (md *MessageDatabase) RefreshContactNames() {
 				msgs[i].ContactShort = name
 			}
 			if stored, ok := md.messagesById[msg.Id]; ok {
+				stored.SenderId = msgs[i].SenderId
+				stored.ContactId = msgs[i].ContactId
 				stored.ContactName = msgs[i].ContactName
 				stored.ContactShort = msgs[i].ContactShort
 				md.messagesById[msg.Id] = stored
