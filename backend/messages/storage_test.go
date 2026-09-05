@@ -103,6 +103,50 @@ func TestAddMessageDoesNotDoubleCountRedelivery(t *testing.T) {
 	}
 }
 
+func TestAddMessageUpgradesCachedPhoneLabel(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	chatID := "group@g.us"
+
+	db.AddMessage(Message{
+		Id:           "m1",
+		ChatId:       chatID,
+		SenderId:     "15551234567:25@s.whatsapp.net",
+		ContactId:    "15551234567:25@s.whatsapp.net",
+		ContactName:  "15551234567:25",
+		ContactShort: "15551234567:25",
+		Timestamp:    100,
+		Text:         "hello",
+		Kind:         MessageKindText,
+	}, false)
+
+	db.AddMessage(Message{
+		Id:           "m1",
+		ChatId:       chatID,
+		SenderId:     "15551234567@s.whatsapp.net",
+		ContactId:    "15551234567@s.whatsapp.net",
+		ContactName:  "Alex Example",
+		ContactShort: "Alex Example",
+		Timestamp:    100,
+		Text:         "hello",
+		Kind:         MessageKindText,
+	}, false)
+
+	msg, ok := db.GetMessage("m1")
+	if !ok {
+		t.Fatal("expected message")
+	}
+	if msg.ContactId != "15551234567@s.whatsapp.net" || msg.SenderId != "15551234567@s.whatsapp.net" {
+		t.Fatalf("expected canonical ids, got contact=%q sender=%q", msg.ContactId, msg.SenderId)
+	}
+	if msg.ContactName != "Alex Example" || msg.ContactShort != "Alex Example" {
+		t.Fatalf("expected richer contact label, got name=%q short=%q", msg.ContactName, msg.ContactShort)
+	}
+	if got := db.GetIdName(msg.ContactId); got != "Alex Example" {
+		t.Fatalf("expected upgraded contact cache, got %q", got)
+	}
+}
+
 func TestRecomputeUnreadCountsIsAuthoritativeWithMessages(t *testing.T) {
 	db := &MessageDatabase{}
 	db.Init()

@@ -48,6 +48,18 @@ func (md *MessageDatabase) AddMessage(msg Message, markUnread bool) bool {
 
 	if existing, ok := md.messagesById[msg.Id]; ok {
 		// Keep the first version, but upgrade metadata if the newer message has richer data.
+		if msg.SenderId != "" {
+			existing.SenderId = msg.SenderId
+		}
+		if msg.ContactId != "" {
+			existing.ContactId = msg.ContactId
+		}
+		if shouldUpgradeContactLabel(existing.ContactName, msg.ContactName, msg.ContactId) {
+			existing.ContactName = msg.ContactName
+		}
+		if shouldUpgradeContactLabel(existing.ContactShort, msg.ContactShort, msg.ContactId) {
+			existing.ContactShort = msg.ContactShort
+		}
 		if existing.RawMessage == nil && msg.RawMessage != nil {
 			existing.RawMessage = msg.RawMessage
 		}
@@ -125,15 +137,57 @@ func (md *MessageDatabase) updateChatFromMessageLocked(msg Message, markUnread b
 
 	if msg.ContactId != "" {
 		md.contactLock.Lock()
-		if _, ok := md.contacts[msg.ContactId]; !ok {
+		if existing, ok := md.contacts[msg.ContactId]; !ok {
 			md.contacts[msg.ContactId] = Contact{
 				Id:    msg.ContactId,
 				Name:  msg.ContactName,
 				Short: msg.ContactShort,
 			}
+		} else {
+			if shouldUpgradeContactLabel(existing.Name, msg.ContactName, msg.ContactId) {
+				existing.Name = msg.ContactName
+			}
+			if shouldUpgradeContactLabel(existing.Short, msg.ContactShort, msg.ContactId) {
+				existing.Short = msg.ContactShort
+			}
+			md.contacts[msg.ContactId] = existing
 		}
 		md.contactLock.Unlock()
 	}
+}
+
+// A re-fetched history message may contain richer participant metadata than
+// the disk-cached copy. Upgrade only phone/JID-shaped fallbacks so a saved
+// address-book name always wins over a WhatsApp profile push name.
+func shouldUpgradeContactLabel(current, candidate, contactID string) bool {
+	return !isFallbackContactLabel(candidate, contactID) && isFallbackContactLabel(current, contactID)
+}
+
+func isFallbackContactLabel(label, contactID string) bool {
+	label = strings.TrimSpace(label)
+	if label == "" || label == contactID {
+		return true
+	}
+
+	// GetIdName's fallback strips the server but preserves an optional linked
+	// device suffix, producing values such as "15551234567:25".
+	user := strings.SplitN(label, "@", 2)[0]
+	user = strings.TrimPrefix(user, "+")
+	parts := strings.Split(user, ":")
+	if len(parts) > 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // AddChat adds or updates a chat in the database.

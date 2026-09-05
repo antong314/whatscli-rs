@@ -2509,25 +2509,59 @@ func (eh *eventHandler) messageFromInfo(info types.MessageInfo, raw *waProto.Mes
 }
 
 func (eh *eventHandler) contactForMessage(info types.MessageInfo) (string, string, string) {
+	var source types.JID
 	if info.IsGroup {
-		resolved := eh.resolveLID(info.Sender)
-		return resolved.String(), eh.getContactName(info.Sender), eh.getContactShort(info.Sender)
+		source = info.Sender
+	} else {
+		source = info.Chat
 	}
-	resolved := eh.resolveLID(info.Chat)
-	return resolved.String(), eh.getContactName(info.Chat), eh.getContactShort(info.Chat)
+
+	resolved := eh.resolveLID(source)
+	contactID := resolved.String()
+	name := eh.getContactName(source)
+	short := eh.getContactShort(source)
+
+	// The message's notify/push name is how native WhatsApp can label an
+	// unsaved group participant (shown there with a leading "~"). Prefer a
+	// saved contact name when one exists, but replace bare phone/JID fallbacks
+	// with the sender-provided name. ParseWebMessage fills this for history as
+	// well as live events.
+	if pushName := usablePushName(info.PushName); pushName != "" {
+		if isFallbackContactLabel(name, contactID) {
+			name = pushName
+		}
+		if isFallbackContactLabel(short, contactID) {
+			short = pushName
+		}
+	}
+
+	return contactID, name, short
 }
 
 func (eh *eventHandler) resolveLID(jid types.JID) types.JID {
+	// Message participant JIDs may include a linked-device suffix (e.g.
+	// 15551234567:25@s.whatsapp.net), while contact and LID stores are keyed
+	// by the canonical user JID. Keeping that suffix caused both failed name
+	// lookups and the visible ":25" label.
+	jid = jid.ToNonAD()
 	if jid.Server != types.HiddenUserServer {
 		return jid
 	}
 	if eh.sm.client != nil && eh.sm.client.Store != nil && eh.sm.client.Store.LIDs != nil {
 		pn, err := eh.sm.client.Store.LIDs.GetPNForLID(context.Background(), jid)
 		if err == nil && !pn.IsEmpty() {
-			return pn
+			return pn.ToNonAD()
 		}
 	}
 	return jid
+}
+
+func usablePushName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "-" || name == "username" {
+		return ""
+	}
+	return name
 }
 
 func (eh *eventHandler) getContactName(jid types.JID) string {

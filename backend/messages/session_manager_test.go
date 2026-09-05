@@ -2,7 +2,48 @@ package messages
 
 import (
 	"testing"
+
+	"go.mau.fi/whatsmeow/types"
 )
+
+func TestContactForMessageUsesPushNameForUnsavedGroupSender(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	eh := &eventHandler{sm: &SessionManager{db: db}}
+	sender := types.NewADJID("15551234567", 0, 25)
+
+	id, name, short := eh.contactForMessage(types.MessageInfo{
+		MessageSource: types.MessageSource{Sender: sender, IsGroup: true},
+		PushName:      " Alex Example ",
+	})
+
+	if id != "15551234567@s.whatsapp.net" {
+		t.Fatalf("expected canonical sender id, got %q", id)
+	}
+	if name != "Alex Example" || short != "Alex Example" {
+		t.Fatalf("expected push name for unsaved participant, got name=%q short=%q", name, short)
+	}
+}
+
+func TestContactForMessageKeepsSavedNameAheadOfPushName(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	id := "15551234567@s.whatsapp.net"
+	db.AddContact(Contact{Id: id, Name: "Saved Alex", Short: "Alex"})
+	eh := &eventHandler{sm: &SessionManager{db: db}}
+
+	_, name, short := eh.contactForMessage(types.MessageInfo{
+		MessageSource: types.MessageSource{
+			Sender:  types.NewJID("15551234567", types.DefaultUserServer),
+			IsGroup: true,
+		},
+		PushName: "Alex Example",
+	})
+
+	if name != "Saved Alex" || short != "Alex" {
+		t.Fatalf("saved contact must win, got name=%q short=%q", name, short)
+	}
+}
 
 // mkIncoming builds an incoming text message fixture for the
 // decideAutoTranslateOutgoing tests. Only the fields the gate actually
