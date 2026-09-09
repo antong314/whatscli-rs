@@ -4,7 +4,10 @@ import (
 	"testing"
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestContactForMessageUsesPushNameForUnsavedGroupSender(t *testing.T) {
@@ -56,6 +59,30 @@ func TestMessageScreensEqualIgnoresRawMessagePointer(t *testing.T) {
 	b[0].ContactName = "New push name"
 	if messageScreensEqual(a, b) {
 		t.Fatal("a visible sender-name upgrade must refresh the open thread")
+	}
+	b[0].ContactName = a[0].ContactName
+	b[0].Reactions = []MessageReaction{{SenderId: "alice@s.whatsapp.net", Emoji: "👍"}}
+	if messageScreensEqual(a, b) {
+		t.Fatal("a visible reaction change must refresh the open thread")
+	}
+}
+
+func TestHistoryReactionsResolvesAuthors(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	eh := &eventHandler{sm: &SessionManager{db: db}}
+	chat := types.NewJID("15551234567", types.DefaultUserServer)
+	items := []*waWeb.Reaction{
+		{Key: &waCommon.MessageKey{FromMe: proto.Bool(true)}, Text: proto.String("👍")},
+		{Key: &waCommon.MessageKey{Participant: proto.String("15557654321:4@s.whatsapp.net")}, Text: proto.String("❤️")},
+	}
+
+	reactions := eh.historyReactions(items, chat)
+	if len(reactions) != 2 {
+		t.Fatalf("expected two reactions, got %#v", reactions)
+	}
+	if reactions[0].SenderId != "15557654321@s.whatsapp.net" || reactions[1].SenderId != "me" {
+		t.Fatalf("expected canonical participant and own identity, got %#v", reactions)
 	}
 }
 

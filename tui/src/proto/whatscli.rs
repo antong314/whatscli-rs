@@ -290,7 +290,7 @@ pub struct SendAudioCommand {
 pub struct ServerEvent {
     #[prost(
         oneof = "server_event::Event",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13"
     )]
     pub event: ::core::option::Option<server_event::Event>,
 }
@@ -322,7 +322,19 @@ pub mod server_event {
         ModelProgress(super::ModelProgress),
         #[prost(message, tag = "12")]
         ColorList(super::ColorList),
+        #[prost(message, tag = "13")]
+        MessageStatus(super::MessageStatusUpdate),
     }
+}
+/// Delivery/read state changed for our own messages (receipt arrived).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MessageStatusUpdate {
+    #[prost(string, tag = "1")]
+    pub chat_id: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    pub message_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(enumeration = "MessageStatus", tag = "3")]
+    pub status: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ChatList {
@@ -419,6 +431,22 @@ pub struct MediaChunk {
     pub total_size: i64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AvatarRequest {
+    #[prost(string, tag = "1")]
+    pub chat_id: ::prost::alloc::string::String,
+    /// Request the small (~96px) preview variant instead of the full-size
+    /// picture. Plenty for list rows and headers, and much cheaper.
+    #[prost(bool, tag = "2")]
+    pub preview: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AvatarResponse {
+    #[prost(bytes = "vec", tag = "1")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub mime_type: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LoginEvent {
     #[prost(oneof = "login_event::Event", tags = "1, 2, 3, 4")]
     pub event: ::core::option::Option<login_event::Event>,
@@ -500,6 +528,19 @@ pub struct MessageProto {
     pub file_name: ::prost::alloc::string::String,
     #[prost(bool, tag = "14")]
     pub unread: bool,
+    #[prost(enumeration = "MessageStatus", tag = "15")]
+    pub status: i32,
+    #[prost(message, repeated, tag = "16")]
+    pub reactions: ::prost::alloc::vec::Vec<ReactionProto>,
+}
+/// One participant's current reaction to a message. WhatsApp permits at most
+/// one reaction per participant; sending an empty reaction removes it.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReactionProto {
+    #[prost(string, tag = "1")]
+    pub sender_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub emoji: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -535,6 +576,47 @@ impl MessageKind {
             "AUDIO" => Some(Self::Audio),
             "DOCUMENT" => Some(Self::Document),
             "UNKNOWN" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+/// Send/delivery state of an outgoing message (WhatsApp tick marks).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MessageStatus {
+    /// incoming messages / no data
+    Unknown = 0,
+    /// not yet accepted by the server (clock)
+    Pending = 1,
+    /// one grey check
+    Sent = 2,
+    /// two grey checks
+    Delivered = 3,
+    /// two blue checks
+    Read = 4,
+}
+impl MessageStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unknown => "MESSAGE_STATUS_UNKNOWN",
+            Self::Pending => "MESSAGE_STATUS_PENDING",
+            Self::Sent => "MESSAGE_STATUS_SENT",
+            Self::Delivered => "MESSAGE_STATUS_DELIVERED",
+            Self::Read => "MESSAGE_STATUS_READ",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MESSAGE_STATUS_UNKNOWN" => Some(Self::Unknown),
+            "MESSAGE_STATUS_PENDING" => Some(Self::Pending),
+            "MESSAGE_STATUS_SENT" => Some(Self::Sent),
+            "MESSAGE_STATUS_DELIVERED" => Some(Self::Delivered),
+            "MESSAGE_STATUS_READ" => Some(Self::Read),
             _ => None,
         }
     }
@@ -681,6 +763,30 @@ pub mod whats_cli_client {
             req.extensions_mut()
                 .insert(GrpcMethod::new("whatscli.WhatsCLI", "GetMedia"));
             self.inner.server_streaming(req, path, codec).await
+        }
+        /// Fetch a chat's profile picture (contact photo or group icon). Returns
+        /// NOT_FOUND when the chat has no picture or it isn't visible to this
+        /// account. Avatars are small, so this is unary rather than streamed.
+        pub async fn get_avatar(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AvatarRequest>,
+        ) -> std::result::Result<tonic::Response<super::AvatarResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/whatscli.WhatsCLI/GetAvatar",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("whatscli.WhatsCLI", "GetAvatar"));
+            self.inner.unary(req, path, codec).await
         }
         /// QR-code login flow. Server streams QR updates until the device is paired
         /// or the timeout expires.

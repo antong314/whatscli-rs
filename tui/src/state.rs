@@ -672,6 +672,10 @@ impl App {
                     self.model_progress = None;
                 }
             }
+            // Delivery/read receipts are reflected in the next full message
+            // snapshot in the legacy TUI; keep accepting the newer protocol
+            // event so regenerated bindings remain exhaustive.
+            Event::MessageStatus(_) => {}
             Event::ColorList(_) => {}
         }
     }

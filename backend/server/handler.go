@@ -311,6 +311,13 @@ func (h *GrpcHandler) LoginSuccess() {
 // --- Type conversion helpers ---
 
 func messageToProto(m messages.Message) *pb.MessageProto {
+	reactions := make([]*pb.ReactionProto, 0, len(m.Reactions))
+	for _, reaction := range m.Reactions {
+		reactions = append(reactions, &pb.ReactionProto{
+			SenderId: reaction.SenderId,
+			Emoji:    reaction.Emoji,
+		})
+	}
 	return &pb.MessageProto{
 		Id:           m.Id,
 		ChatId:       m.ChatId,
@@ -327,6 +334,7 @@ func messageToProto(m messages.Message) *pb.MessageProto {
 		FileName:     m.FileName,
 		Unread:       m.Unread,
 		Status:       messageStatusToProto(m.Status),
+		Reactions:    reactions,
 	}
 }
 

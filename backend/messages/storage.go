@@ -86,6 +86,12 @@ func (md *MessageDatabase) AddMessage(msg Message, markUnread bool) bool {
 		if statusRank(msg.Status) > statusRank(existing.Status) {
 			existing.Status = msg.Status
 		}
+		// History-sync copies contain the authoritative reaction set. A live
+		// message echo generally doesn't, so an empty slice must not erase
+		// reactions already learned from history or live reaction events.
+		if len(msg.Reactions) > 0 {
+			existing.Reactions = normalizedReactions(msg.Reactions)
+		}
 		// Only bump the chat counter on a false→true transition: re-delivered
 		// messages (offline sync, cache reload) must not count twice.
 		newlyUnread := markUnread && !existing.Unread
@@ -106,6 +112,88 @@ func (md *MessageDatabase) AddMessage(msg Message, markUnread bool) bool {
 		return md.messages[msg.ChatId][i].Timestamp < md.messages[msg.ChatId][j].Timestamp
 	})
 	md.updateChatFromMessageLocked(msg, markUnread)
+	return true
+}
+
+// SetMessageReactions replaces a message's reaction set with an authoritative
+// history-sync snapshot. It returns true only when visible state changed.
+func (md *MessageDatabase) SetMessageReactions(messageID string, reactions []MessageReaction) bool {
+	md.messageLock.Lock()
+	defer md.messageLock.Unlock()
+
+	msg, ok := md.messagesById[messageID]
+	if !ok {
+		return false
+	}
+	next := normalizedReactions(reactions)
+	if messageReactionsEqual(msg.Reactions, next) {
+		return false
+	}
+	msg.Reactions = next
+	md.messagesById[messageID] = msg
+	md.replaceMessageLocked(msg)
+	return true
+}
+
+// ApplyMessageReaction applies a live add/change/remove event. WhatsApp allows
+// one current reaction per sender, so a new emoji replaces the old one and an
+// empty emoji removes it. The returned Message is the updated target.
+func (md *MessageDatabase) ApplyMessageReaction(messageID, senderID, emoji string) (Message, bool) {
+	md.messageLock.Lock()
+	defer md.messageLock.Unlock()
+
+	msg, ok := md.messagesById[messageID]
+	if !ok || senderID == "" {
+		return Message{}, false
+	}
+	senderID = canonicalMessageJID(senderID)
+	next := make([]MessageReaction, 0, len(msg.Reactions)+1)
+	for _, reaction := range msg.Reactions {
+		if canonicalMessageJID(reaction.SenderId) != senderID {
+			next = append(next, reaction)
+		}
+	}
+	if strings.TrimSpace(emoji) != "" {
+		next = append(next, MessageReaction{SenderId: senderID, Emoji: emoji})
+	}
+	next = normalizedReactions(next)
+	if messageReactionsEqual(msg.Reactions, next) {
+		return msg, false
+	}
+	msg.Reactions = next
+	md.messagesById[messageID] = msg
+	md.replaceMessageLocked(msg)
+	return msg, true
+}
+
+func normalizedReactions(reactions []MessageReaction) []MessageReaction {
+	bySender := make(map[string]string, len(reactions))
+	for _, reaction := range reactions {
+		senderID := canonicalMessageJID(reaction.SenderId)
+		if senderID == "" || strings.TrimSpace(reaction.Emoji) == "" {
+			continue
+		}
+		bySender[senderID] = reaction.Emoji
+	}
+	out := make([]MessageReaction, 0, len(bySender))
+	for senderID, emoji := range bySender {
+		out = append(out, MessageReaction{SenderId: senderID, Emoji: emoji})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SenderId < out[j].SenderId })
+	return out
+}
+
+func messageReactionsEqual(a, b []MessageReaction) bool {
+	a = normalizedReactions(a)
+	b = normalizedReactions(b)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
 	return true
 }
 
@@ -767,22 +855,23 @@ func (md *MessageDatabase) LoadChatCache() {
 }
 
 type messageCacheEntry struct {
-	Id           string `json:"id"`
-	ChatId       string `json:"chat_id"`
-	SenderId     string `json:"sender_id,omitempty"`
-	ContactId    string `json:"contact_id,omitempty"`
-	ContactName  string `json:"contact_name,omitempty"`
-	ContactShort string `json:"contact_short,omitempty"`
-	Timestamp    uint64 `json:"ts"`
-	FromMe       bool   `json:"from_me,omitempty"`
-	Forwarded    bool   `json:"forwarded,omitempty"`
-	Text         string `json:"text,omitempty"`
-	Kind         string `json:"kind,omitempty"`
-	MimeType     string `json:"mime,omitempty"`
-	FileName     string `json:"file,omitempty"`
-	RawProto     string `json:"raw,omitempty"`
-	Unread       bool   `json:"unread,omitempty"`
-	Status       string `json:"status,omitempty"`
+	Id           string            `json:"id"`
+	ChatId       string            `json:"chat_id"`
+	SenderId     string            `json:"sender_id,omitempty"`
+	ContactId    string            `json:"contact_id,omitempty"`
+	ContactName  string            `json:"contact_name,omitempty"`
+	ContactShort string            `json:"contact_short,omitempty"`
+	Timestamp    uint64            `json:"ts"`
+	FromMe       bool              `json:"from_me,omitempty"`
+	Forwarded    bool              `json:"forwarded,omitempty"`
+	Text         string            `json:"text,omitempty"`
+	Kind         string            `json:"kind,omitempty"`
+	MimeType     string            `json:"mime,omitempty"`
+	FileName     string            `json:"file,omitempty"`
+	RawProto     string            `json:"raw,omitempty"`
+	Unread       bool              `json:"unread,omitempty"`
+	Status       string            `json:"status,omitempty"`
+	Reactions    []MessageReaction `json:"reactions,omitempty"`
 }
 
 // SaveMessageCache persists all in-memory messages to disk.
@@ -806,6 +895,7 @@ func (md *MessageDatabase) SaveMessageCache() {
 			FileName:     msg.FileName,
 			Unread:       msg.Unread,
 			Status:       string(msg.Status),
+			Reactions:    msg.Reactions,
 		}
 		if msg.RawMessage != nil {
 			if raw, err := proto.Marshal(msg.RawMessage); err == nil {
@@ -850,6 +940,7 @@ func (md *MessageDatabase) LoadMessageCache() {
 			FileName:     entry.FileName,
 			Unread:       entry.Unread,
 			Status:       MessageStatus(entry.Status),
+			Reactions:    entry.Reactions,
 		}
 		if entry.RawProto != "" {
 			if raw, err := base64.StdEncoding.DecodeString(entry.RawProto); err == nil {

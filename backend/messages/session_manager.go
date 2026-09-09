@@ -87,6 +87,12 @@ type SessionManager struct {
 	chatRefreshTimer       *time.Timer
 	chatRefreshPushPending bool
 
+	// historyRefreshAt throttles lightweight per-selection history refreshes.
+	// Cached messages render immediately; the phone response supplies mutable
+	// metadata such as reactions that the older disk cache may not contain.
+	historyRefreshMu sync.Mutex
+	historyRefreshAt map[string]time.Time
+
 	// userDisconnected is set when the user explicitly disconnects, so the
 	// connection watchdog doesn't fight their intent by reconnecting.
 	userDisconnected bool
@@ -157,6 +163,7 @@ func (sm *SessionManager) Init(handler UiMessageHandler) {
 	sm.eventHandler = &eventHandler{sm: sm}
 	sm.markReadDelay = DefaultMarkReadDelay
 	sm.markReadFn = sm.autoMarkRead
+	sm.historyRefreshAt = make(map[string]time.Time)
 }
 
 // StartManager starts the receiver and message handling goroutine.
@@ -250,6 +257,7 @@ func (sm *SessionManager) setCurrentReceiver(id string, intent SelectIntent) {
 	sm.currentReceiver = id
 	msgs := sm.getMessages(id)
 	sm.uiHandler.NewScreen(msgs)
+	sm.refreshSelectedChatHistory(id)
 	limit := sm.uiHandler.GetViewportLines()
 	if limit < 50 {
 		limit = 50
@@ -262,6 +270,32 @@ func (sm *SessionManager) setCurrentReceiver(id string, intent SelectIntent) {
 	sm.transcribeScreenMessages(tail)
 
 	sm.scheduleAutoMarkRead(id, intent)
+}
+
+// refreshSelectedChatHistory asks the phone for a recent authoritative slice
+// without delaying the cached screen. Reactions are mutable message metadata,
+// so a local message cache alone cannot be the final authority. The throttle
+// prevents rapid sidebar navigation from flooding the linked-device channel.
+func (sm *SessionManager) refreshSelectedChatHistory(chatID string) {
+	now := time.Now()
+	sm.historyRefreshMu.Lock()
+	last := sm.historyRefreshAt[chatID]
+	if !last.IsZero() && now.Sub(last) < 30*time.Second {
+		sm.historyRefreshMu.Unlock()
+		return
+	}
+	sm.historyRefreshAt[chatID] = now
+	sm.historyRefreshMu.Unlock()
+
+	go func() {
+		started := time.Now()
+		err := sm.requestChatHistorySync(chatID)
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "[history-refresh] request failed error=%q duration_ms=%d\n", err, time.Since(started).Milliseconds())
+			return
+		}
+		fmt.Fprintf(os.Stdout, "[history-refresh] request sent duration_ms=%d\n", time.Since(started).Milliseconds())
+	}()
 }
 
 // scheduleAutoMarkRead arranges for `chatID` to be marked as read.
@@ -2251,6 +2285,10 @@ func (sm *SessionManager) scheduleCacheRefresh(pushChats bool) {
 }
 
 func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
+	if eh.handleLiveReaction(evt) {
+		return
+	}
+
 	msg, action, ok := eh.normalizeEventMessage(evt)
 	if !ok {
 		return
@@ -2311,6 +2349,60 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 	}
 }
 
+// handleLiveReaction consumes reaction protocol messages before ordinary
+// message normalization (which intentionally ignores protocol-only payloads).
+// It returns true whenever evt is a reaction, including malformed/decryption
+// failures, so a reaction can never surface as an "unsupported" chat message.
+func (eh *eventHandler) handleLiveReaction(evt *events.Message) bool {
+	if evt == nil || evt.Message == nil {
+		return false
+	}
+	reaction := evt.Message.GetReactionMessage()
+	if reaction == nil && evt.Message.GetEncReactionMessage() != nil {
+		if eh.sm.client == nil {
+			fmt.Fprintln(os.Stdout, "[reaction] ignored encrypted reaction: client unavailable")
+			return true
+		}
+		decrypted, err := eh.sm.client.DecryptReaction(context.Background(), evt)
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "[reaction] decrypt failed error=%q\n", err)
+			return true
+		}
+		reaction = decrypted
+	}
+	if reaction == nil {
+		return false
+	}
+
+	targetID := reaction.GetKey().GetID()
+	senderID := eh.resolveLID(evt.Info.Sender).String()
+	if evt.Info.IsFromMe {
+		senderID = "me"
+	}
+	if targetID == "" || senderID == "" {
+		fmt.Fprintf(os.Stdout, "[reaction] ignored malformed target_present=%t sender_present=%t\n", targetID != "", senderID != "")
+		return true
+	}
+
+	updated, changed := eh.sm.db.ApplyMessageReaction(targetID, senderID, reaction.GetText())
+	if !changed {
+		if _, exists := eh.sm.db.GetMessage(targetID); !exists {
+			fmt.Fprintln(os.Stdout, "[reaction] target missing; awaiting history sync")
+		}
+		return true
+	}
+	if updated.ChatId == eh.sm.currentReceiver {
+		eh.sm.uiHandler.NewScreen(eh.sm.getMessages(updated.ChatId))
+	}
+	eh.sm.scheduleCacheRefresh(false)
+	action := "set"
+	if reaction.GetText() == "" {
+		action = "remove"
+	}
+	fmt.Fprintf(os.Stdout, "[reaction] applied action=%s open_chat=%t\n", action, updated.ChatId == eh.sm.currentReceiver)
+	return true
+}
+
 func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 	if evt == nil || evt.Data == nil {
 		return
@@ -2321,6 +2413,8 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 	chatsBefore := eh.sm.db.GetChatIds()
 	currentConversationIncluded := false
 	addedMessages := 0
+	reactionChanges := 0
+	reactionCount := 0
 	fmt.Fprintf(
 		os.Stdout,
 		"[history-sync] started type=%s conversations=%d current_open=%t\n",
@@ -2401,6 +2495,11 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			if eh.sm.db.AddMessage(msg, false) {
 				addedMessages++
 			}
+			reactions := eh.historyReactions(webMsg.GetReactions(), chatJID)
+			reactionCount += len(reactions)
+			if eh.sm.db.SetMessageReactions(msg.Id, reactions) {
+				reactionChanges++
+			}
 		}
 		if evt.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
 			// This conversation came from an explicit per-chat request to the
@@ -2442,16 +2541,48 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 	}
 	fmt.Fprintf(
 		os.Stdout,
-		"[history-sync] completed type=%s conversations=%d added_messages=%d chats_changed=%t current_included=%t current_changed=%t screen_pushed=%t duration_ms=%d\n",
+		"[history-sync] completed type=%s conversations=%d added_messages=%d reactions=%d reaction_changes=%d chats_changed=%t current_included=%t current_changed=%t screen_pushed=%t duration_ms=%d\n",
 		evt.Data.GetSyncType().String(),
 		len(evt.Data.GetConversations()),
 		addedMessages,
+		reactionCount,
+		reactionChanges,
 		chatsChanged,
 		currentConversationIncluded,
 		currentChanged,
 		currentScreenPushed,
 		time.Since(started).Milliseconds(),
 	)
+}
+
+// historyReactions converts the authoritative reaction metadata attached to a
+// history message. The reaction key identifies the reacting participant (and
+// whether it was us); the containing WebMessageInfo identifies the target.
+func (eh *eventHandler) historyReactions(items []*waWeb.Reaction, chatJID types.JID) []MessageReaction {
+	reactions := make([]MessageReaction, 0, len(items))
+	for _, item := range items {
+		if item == nil || item.GetKey() == nil || strings.TrimSpace(item.GetText()) == "" {
+			continue
+		}
+		key := item.GetKey()
+		senderID := ""
+		switch {
+		case key.GetFromMe():
+			senderID = "me"
+		case key.GetParticipant() != "":
+			if participant, err := types.ParseJID(key.GetParticipant()); err == nil {
+				senderID = eh.resolveLID(participant).String()
+			} else {
+				senderID = canonicalMessageJID(key.GetParticipant())
+			}
+		default:
+			// In a one-to-one chat WhatsApp omits Participant; the other
+			// party is the chat itself.
+			senderID = eh.resolveLID(chatJID).String()
+		}
+		reactions = append(reactions, MessageReaction{SenderId: senderID, Emoji: item.GetText()})
+	}
+	return normalizedReactions(reactions)
 }
 
 // messageScreensEqual compares exactly the fields sent to the GUI. RawMessage
@@ -2468,7 +2599,8 @@ func messageScreensEqual(a, b []Message) bool {
 			x.ContactShort != y.ContactShort || x.Timestamp != y.Timestamp ||
 			x.FromMe != y.FromMe || x.Forwarded != y.Forwarded || x.Text != y.Text ||
 			x.Kind != y.Kind || x.MimeType != y.MimeType || x.FileName != y.FileName ||
-			x.Unread != y.Unread || x.Status != y.Status {
+			x.Unread != y.Unread || x.Status != y.Status ||
+			!messageReactionsEqual(x.Reactions, y.Reactions) {
 			return false
 		}
 	}

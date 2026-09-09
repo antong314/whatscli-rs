@@ -3295,6 +3295,7 @@ type MessageProto struct {
 	FileName      string                 `protobuf:"bytes,13,opt,name=file_name,json=fileName,proto3" json:"file_name,omitempty"`
 	Unread        bool                   `protobuf:"varint,14,opt,name=unread,proto3" json:"unread,omitempty"`
 	Status        MessageStatus          `protobuf:"varint,15,opt,name=status,proto3,enum=whatscli.MessageStatus" json:"status,omitempty"`
+	Reactions     []*ReactionProto       `protobuf:"bytes,16,rep,name=reactions,proto3" json:"reactions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3432,6 +3433,67 @@ func (x *MessageProto) GetStatus() MessageStatus {
 		return x.Status
 	}
 	return MessageStatus_MESSAGE_STATUS_UNKNOWN
+}
+
+func (x *MessageProto) GetReactions() []*ReactionProto {
+	if x != nil {
+		return x.Reactions
+	}
+	return nil
+}
+
+// One participant's current reaction to a message. WhatsApp permits at most
+// one reaction per participant; sending an empty reaction removes it.
+type ReactionProto struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SenderId      string                 `protobuf:"bytes,1,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`
+	Emoji         string                 `protobuf:"bytes,2,opt,name=emoji,proto3" json:"emoji,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReactionProto) Reset() {
+	*x = ReactionProto{}
+	mi := &file_whatscli_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReactionProto) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReactionProto) ProtoMessage() {}
+
+func (x *ReactionProto) ProtoReflect() protoreflect.Message {
+	mi := &file_whatscli_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReactionProto.ProtoReflect.Descriptor instead.
+func (*ReactionProto) Descriptor() ([]byte, []int) {
+	return file_whatscli_proto_rawDescGZIP(), []int{50}
+}
+
+func (x *ReactionProto) GetSenderId() string {
+	if x != nil {
+		return x.SenderId
+	}
+	return ""
+}
+
+func (x *ReactionProto) GetEmoji() string {
+	if x != nil {
+		return x.Emoji
+	}
+	return ""
 }
 
 var File_whatscli_proto protoreflect.FileDescriptor
@@ -3655,7 +3717,7 @@ const file_whatscli_proto_rawDesc = "" +
 	"\x06unread\x18\x04 \x01(\x05R\x06unread\x12!\n" +
 	"\flast_message\x18\x05 \x01(\x03R\vlastMessage\x12\x1a\n" +
 	"\barchived\x18\x06 \x01(\bR\barchived\x12\x16\n" +
-	"\x06pinned\x18\a \x01(\bR\x06pinned\"\xd2\x03\n" +
+	"\x06pinned\x18\a \x01(\bR\x06pinned\"\x89\x04\n" +
 	"\fMessageProto\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
 	"\achat_id\x18\x02 \x01(\tR\x06chatId\x12\x1b\n" +
@@ -3673,7 +3735,11 @@ const file_whatscli_proto_rawDesc = "" +
 	"\tmime_type\x18\f \x01(\tR\bmimeType\x12\x1b\n" +
 	"\tfile_name\x18\r \x01(\tR\bfileName\x12\x16\n" +
 	"\x06unread\x18\x0e \x01(\bR\x06unread\x12/\n" +
-	"\x06status\x18\x0f \x01(\x0e2\x17.whatscli.MessageStatusR\x06status*S\n" +
+	"\x06status\x18\x0f \x01(\x0e2\x17.whatscli.MessageStatusR\x06status\x125\n" +
+	"\treactions\x18\x10 \x03(\v2\x17.whatscli.ReactionProtoR\treactions\"B\n" +
+	"\rReactionProto\x12\x1b\n" +
+	"\tsender_id\x18\x01 \x01(\tR\bsenderId\x12\x14\n" +
+	"\x05emoji\x18\x02 \x01(\tR\x05emoji*S\n" +
 	"\vMessageKind\x12\b\n" +
 	"\x04TEXT\x10\x00\x12\t\n" +
 	"\x05IMAGE\x10\x01\x12\t\n" +
@@ -3706,7 +3772,7 @@ func file_whatscli_proto_rawDescGZIP() []byte {
 }
 
 var file_whatscli_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_whatscli_proto_msgTypes = make([]protoimpl.MessageInfo, 50)
+var file_whatscli_proto_msgTypes = make([]protoimpl.MessageInfo, 51)
 var file_whatscli_proto_goTypes = []any{
 	(MessageKind)(0),            // 0: whatscli.MessageKind
 	(MessageStatus)(0),          // 1: whatscli.MessageStatus
@@ -3762,6 +3828,7 @@ var file_whatscli_proto_goTypes = []any{
 	(*LoginError)(nil),          // 51: whatscli.LoginError
 	(*ChatProto)(nil),           // 52: whatscli.ChatProto
 	(*MessageProto)(nil),        // 53: whatscli.MessageProto
+	(*ReactionProto)(nil),       // 54: whatscli.ReactionProto
 }
 var file_whatscli_proto_depIdxs = []int32{
 	5,  // 0: whatscli.ClientMessage.handshake:type_name -> whatscli.ConnectHandshake
@@ -3814,19 +3881,20 @@ var file_whatscli_proto_depIdxs = []int32{
 	51, // 47: whatscli.LoginEvent.error:type_name -> whatscli.LoginError
 	0,  // 48: whatscli.MessageProto.kind:type_name -> whatscli.MessageKind
 	1,  // 49: whatscli.MessageProto.status:type_name -> whatscli.MessageStatus
-	4,  // 50: whatscli.WhatsCLI.EventStream:input_type -> whatscli.ClientMessage
-	43, // 51: whatscli.WhatsCLI.GetMedia:input_type -> whatscli.MediaRequest
-	45, // 52: whatscli.WhatsCLI.GetAvatar:input_type -> whatscli.AvatarRequest
-	12, // 53: whatscli.WhatsCLI.Login:input_type -> whatscli.LoginRequest
-	29, // 54: whatscli.WhatsCLI.EventStream:output_type -> whatscli.ServerEvent
-	44, // 55: whatscli.WhatsCLI.GetMedia:output_type -> whatscli.MediaChunk
-	46, // 56: whatscli.WhatsCLI.GetAvatar:output_type -> whatscli.AvatarResponse
-	47, // 57: whatscli.WhatsCLI.Login:output_type -> whatscli.LoginEvent
-	54, // [54:58] is the sub-list for method output_type
-	50, // [50:54] is the sub-list for method input_type
-	50, // [50:50] is the sub-list for extension type_name
-	50, // [50:50] is the sub-list for extension extendee
-	0,  // [0:50] is the sub-list for field type_name
+	54, // 50: whatscli.MessageProto.reactions:type_name -> whatscli.ReactionProto
+	4,  // 51: whatscli.WhatsCLI.EventStream:input_type -> whatscli.ClientMessage
+	43, // 52: whatscli.WhatsCLI.GetMedia:input_type -> whatscli.MediaRequest
+	45, // 53: whatscli.WhatsCLI.GetAvatar:input_type -> whatscli.AvatarRequest
+	12, // 54: whatscli.WhatsCLI.Login:input_type -> whatscli.LoginRequest
+	29, // 55: whatscli.WhatsCLI.EventStream:output_type -> whatscli.ServerEvent
+	44, // 56: whatscli.WhatsCLI.GetMedia:output_type -> whatscli.MediaChunk
+	46, // 57: whatscli.WhatsCLI.GetAvatar:output_type -> whatscli.AvatarResponse
+	47, // 58: whatscli.WhatsCLI.Login:output_type -> whatscli.LoginEvent
+	55, // [55:59] is the sub-list for method output_type
+	51, // [51:55] is the sub-list for method input_type
+	51, // [51:51] is the sub-list for extension type_name
+	51, // [51:51] is the sub-list for extension extendee
+	0,  // [0:51] is the sub-list for field type_name
 }
 
 func init() { file_whatscli_proto_init() }
@@ -3887,7 +3955,7 @@ func file_whatscli_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_whatscli_proto_rawDesc), len(file_whatscli_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   50,
+			NumMessages:   51,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

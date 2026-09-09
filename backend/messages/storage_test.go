@@ -36,6 +36,49 @@ func TestGetChatIdsSortOrder(t *testing.T) {
 	}
 }
 
+func TestMessageReactionsReplaceAndRemovePerSender(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	db.AddMessage(Message{Id: "m1", ChatId: "chat@s.whatsapp.net", Text: "hello", Kind: MessageKindText}, false)
+
+	if _, changed := db.ApplyMessageReaction("m1", "alice:12@s.whatsapp.net", "👍"); !changed {
+		t.Fatal("first reaction should change the target message")
+	}
+	updated, changed := db.ApplyMessageReaction("m1", "alice@s.whatsapp.net", "❤️")
+	if !changed || len(updated.Reactions) != 1 || updated.Reactions[0].Emoji != "❤️" {
+		t.Fatalf("same sender should replace their prior reaction: %#v", updated.Reactions)
+	}
+	updated, changed = db.ApplyMessageReaction("m1", "alice@s.whatsapp.net", "")
+	if !changed || len(updated.Reactions) != 0 {
+		t.Fatalf("empty emoji should remove the sender's reaction: %#v", updated.Reactions)
+	}
+	if _, changed = db.ApplyMessageReaction("missing", "alice@s.whatsapp.net", "👍"); changed {
+		t.Fatal("reaction for an unknown target must not report a visible change")
+	}
+}
+
+func TestSetMessageReactionsUsesAuthoritativeSnapshot(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	db.AddMessage(Message{Id: "m1", ChatId: "chat@s.whatsapp.net", Text: "hello", Kind: MessageKindText}, false)
+
+	reactions := []MessageReaction{
+		{SenderId: "bob@s.whatsapp.net", Emoji: "👍"},
+		{SenderId: "alice@s.whatsapp.net", Emoji: "👍"},
+		{SenderId: "alice:9@s.whatsapp.net", Emoji: "😂"},
+	}
+	if !db.SetMessageReactions("m1", reactions) {
+		t.Fatal("history reactions should update the message")
+	}
+	msg, _ := db.GetMessage("m1")
+	if len(msg.Reactions) != 2 || msg.Reactions[0].SenderId != "alice@s.whatsapp.net" || msg.Reactions[0].Emoji != "😂" {
+		t.Fatalf("reactions should be canonicalized and deduplicated: %#v", msg.Reactions)
+	}
+	if !db.SetMessageReactions("m1", nil) {
+		t.Fatal("an empty authoritative snapshot should clear old reactions")
+	}
+}
+
 func TestGetChatIdsKeepsUnreadZeroTimestamp(t *testing.T) {
 	db := &MessageDatabase{}
 	db.Init()

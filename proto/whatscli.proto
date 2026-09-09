@@ -376,4 +376,12 @@ message MessageProto {
   string file_name = 13;
   bool unread = 14;
   MessageStatus status = 15;
+  repeated ReactionProto reactions = 16;
+}
+
+// One participant's current reaction to a message. WhatsApp permits at most
+// one reaction per participant; sending an empty reaction removes it.
+message ReactionProto {
+  string sender_id = 1;
+  string emoji = 2;
 }

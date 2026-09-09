@@ -1,4 +1,4 @@
-//this package manages the messages
+// this package manages the messages
 package messages
 
 import (
@@ -147,7 +147,16 @@ type Message struct {
 	FileName     string
 	Unread       bool
 	Status       MessageStatus
+	Reactions    []MessageReaction
 	RawMessage   *waProto.Message
+}
+
+// MessageReaction is one participant's current reaction to a message.
+// WhatsApp sends an empty emoji to remove that participant's reaction, so
+// only non-empty values are stored here.
+type MessageReaction struct {
+	SenderId string `json:"sender_id"`
+	Emoji    string `json:"emoji"`
 }
 
 // internal contact representation to abstract from message lib
