@@ -217,7 +217,7 @@ func (s *WhatsCLIServer) handleClientMessage(msg *pb.ClientMessage) {
 	case *pb.ClientMessage_SendText:
 		cmd = messages.Command{Name: "send", Params: []string{m.SendText.ChatId, m.SendText.Text}}
 	case *pb.ClientMessage_SendMedia:
-		cmd = messages.Command{Name: "upload", Params: []string{m.SendMedia.FilePath}}
+		cmd = messages.Command{Name: commandNameForMediaKind(m.SendMedia.Kind), Params: []string{m.SendMedia.FilePath}}
 
 	case *pb.ClientMessage_MarkRead:
 		cmd = messages.Command{Name: "read"}
@@ -282,4 +282,20 @@ func (s *WhatsCLIServer) handleClientMessage(msg *pb.ClientMessage) {
 	}
 
 	s.sm.CommandChannel <- cmd
+}
+
+// commandNameForMediaKind preserves the structured client's media type when
+// bridging into the backend's legacy Command API. Falling back to upload keeps
+// unknown/future values safe as documents instead of mislabelling their bytes.
+func commandNameForMediaKind(kind pb.MessageKind) string {
+	switch kind {
+	case pb.MessageKind_IMAGE:
+		return "sendimage"
+	case pb.MessageKind_VIDEO:
+		return "sendvideo"
+	case pb.MessageKind_AUDIO:
+		return "sendaudio"
+	default:
+		return "upload"
+	}
 }
