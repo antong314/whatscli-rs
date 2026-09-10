@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 
@@ -116,6 +117,14 @@ func (s *WhatsCLIServer) GetMedia(req *pb.MediaRequest, stream pb.WhatsCLI_GetMe
 
 	path, err := s.sm.DownloadImage(msg)
 	if err != nil {
+		// WhatsApp's full-size media URLs expire. History still contains a
+		// small JPEG preview, which is exactly what the shared-media gallery
+		// needs. Returning it is much more useful than four broken tiles for
+		// an otherwise valid historical message.
+		if preview := embeddedMediaPreview(msg); len(preview) > 0 {
+			fmt.Fprintf(os.Stderr, "[media] full download unavailable; serving embedded preview message=%s bytes=%d error=%v\n", mediaLogToken(req.MessageId), len(preview), err)
+			return sendMediaBytes(preview, "image/jpeg", stream)
+		}
 		return status.Errorf(codes.Internal, "failed to download media: %v", err)
 	}
 
@@ -155,6 +164,47 @@ func (s *WhatsCLIServer) GetMedia(req *pb.MediaRequest, stream pb.WhatsCLI_GetMe
 		}
 	}
 	return nil
+}
+
+// embeddedMediaPreview extracts the preview WhatsApp stores alongside image,
+// video, and document metadata. These bytes remain available after the
+// full-size CDN URL expires.
+func embeddedMediaPreview(msg messages.Message) []byte {
+	if msg.RawMessage == nil {
+		return nil
+	}
+	if media := msg.RawMessage.GetImageMessage(); media != nil {
+		return media.GetJPEGThumbnail()
+	}
+	if media := msg.RawMessage.GetVideoMessage(); media != nil {
+		return media.GetJPEGThumbnail()
+	}
+	if media := msg.RawMessage.GetDocumentMessage(); media != nil {
+		return media.GetJPEGThumbnail()
+	}
+	return nil
+}
+
+func sendMediaBytes(data []byte, mimeType string, stream pb.WhatsCLI_GetMediaServer) error {
+	const chunkSize = 64 * 1024
+	for offset := 0; offset < len(data); offset += chunkSize {
+		end := min(offset+chunkSize, len(data))
+		chunk := &pb.MediaChunk{Data: data[offset:end]}
+		if offset == 0 {
+			chunk.MimeType = mimeType
+			chunk.TotalSize = int64(len(data))
+		}
+		if err := stream.Send(chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func mediaLogToken(messageID string) string {
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(messageID))
+	return fmt.Sprintf("%016x", hash.Sum64())
 }
 
 // GetAvatar returns the profile picture for a chat. Unary — avatars are a
