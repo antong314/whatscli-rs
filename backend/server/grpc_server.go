@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"os"
+	"time"
 
 	pb "github.com/antong314/whatscli-rs/backend/gen/pb"
 	"github.com/antong314/whatscli-rs/backend/messages"
@@ -110,8 +111,12 @@ func (s *WhatsCLIServer) EventStream(stream pb.WhatsCLI_EventStreamServer) error
 
 // GetMedia streams the media bytes for a given message.
 func (s *WhatsCLIServer) GetMedia(req *pb.MediaRequest, stream pb.WhatsCLI_GetMediaServer) error {
+	started := time.Now()
+	token := mediaLogToken(req.MessageId)
+	fmt.Printf("[media-rpc] started message=%s\n", token)
 	msg, ok := s.sm.GetMessageByID(req.MessageId)
 	if !ok {
+		fmt.Printf("[media-rpc] failed message=%s reason=not_found duration_ms=%d\n", token, time.Since(started).Milliseconds())
 		return status.Errorf(codes.NotFound, "message not found: %s", req.MessageId)
 	}
 
@@ -122,22 +127,26 @@ func (s *WhatsCLIServer) GetMedia(req *pb.MediaRequest, stream pb.WhatsCLI_GetMe
 		// needs. Returning it is much more useful than four broken tiles for
 		// an otherwise valid historical message.
 		if preview := embeddedMediaPreview(msg); len(preview) > 0 {
-			fmt.Fprintf(os.Stderr, "[media] full download unavailable; serving embedded preview message=%s bytes=%d error=%v\n", mediaLogToken(req.MessageId), len(preview), err)
+			fmt.Printf("[media-rpc] completed message=%s source=embedded_preview bytes=%d duration_ms=%d full_error=%v\n", token, len(preview), time.Since(started).Milliseconds(), err)
 			return sendMediaBytes(preview, "image/jpeg", stream)
 		}
+		fmt.Printf("[media-rpc] failed message=%s reason=download duration_ms=%d error=%v\n", token, time.Since(started).Milliseconds(), err)
 		return status.Errorf(codes.Internal, "failed to download media: %v", err)
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
+		fmt.Printf("[media-rpc] failed message=%s reason=open duration_ms=%d error=%v\n", token, time.Since(started).Milliseconds(), err)
 		return status.Errorf(codes.Internal, "failed to open media file: %v", err)
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
+		fmt.Printf("[media-rpc] failed message=%s reason=stat duration_ms=%d error=%v\n", token, time.Since(started).Milliseconds(), err)
 		return status.Errorf(codes.Internal, "failed to stat media file: %v", err)
 	}
+	fmt.Printf("[media-rpc] streaming message=%s source=full bytes=%d download_ms=%d\n", token, info.Size(), time.Since(started).Milliseconds())
 
 	buf := make([]byte, 64*1024)
 	first := true
@@ -163,6 +172,7 @@ func (s *WhatsCLIServer) GetMedia(req *pb.MediaRequest, stream pb.WhatsCLI_GetMe
 			return status.Errorf(codes.Internal, "error reading media: %v", err)
 		}
 	}
+	fmt.Printf("[media-rpc] completed message=%s source=full bytes=%d duration_ms=%d\n", token, info.Size(), time.Since(started).Milliseconds())
 	return nil
 }
 
