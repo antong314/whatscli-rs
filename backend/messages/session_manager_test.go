@@ -98,6 +98,71 @@ func TestChatScreensEqualDetectsVisibleChanges(t *testing.T) {
 	}
 }
 
+func TestTranslatableMessageTextExtractsMediaCaptions(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  Message
+		want string
+	}{
+		{
+			name: "image caption",
+			msg:  Message{Kind: MessageKindImage, Text: "[IMAGE] Ese grifo ya está instalado"},
+			want: "Ese grifo ya está instalado",
+		},
+		{
+			name: "captionless image",
+			msg:  Message{Kind: MessageKindImage, Text: "[IMAGE]"},
+			want: "",
+		},
+		{
+			name: "video caption",
+			msg:  Message{Kind: MessageKindVideo, Text: "[VIDEO] Mira esto mañana"},
+			want: "Mira esto mañana",
+		},
+		{
+			name: "document caption without filename",
+			msg: Message{
+				Kind:     MessageKindDocument,
+				FileName: "planos.pdf",
+				Text:     "[DOCUMENT] planos.pdf Aquí están los planos",
+			},
+			want: "Aquí están los planos",
+		},
+		{
+			name: "captionless document",
+			msg: Message{
+				Kind:     MessageKindDocument,
+				FileName: "planos.pdf",
+				Text:     "[DOCUMENT] planos.pdf",
+			},
+			want: "",
+		},
+		{
+			name: "audio placeholder",
+			msg:  Message{Kind: MessageKindAudio, Text: "[AUDIO 0:12]"},
+			want: "",
+		},
+		{
+			name: "audio transcript supplied by caller",
+			msg:  Message{Kind: MessageKindAudio, Text: "Nos vemos mañana"},
+			want: "Nos vemos mañana",
+		},
+		{
+			name: "already normalized image caption",
+			msg:  Message{Kind: MessageKindImage, Text: "Ese grifo ya está instalado"},
+			want: "Ese grifo ya está instalado",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := translatableMessageText(tt.msg); got != tt.want {
+				t.Fatalf("translatableMessageText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // mkIncoming builds an incoming text message fixture for the
 // decideAutoTranslateOutgoing tests. Only the fields the gate actually
 // reads (FromMe, Text) need to be populated.

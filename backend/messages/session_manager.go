@@ -1594,8 +1594,10 @@ func (sm *SessionManager) translateScreenMessages(msgs []Message) {
 	}
 	texts := make([]string, 0, len(msgs))
 	for _, m := range msgs {
-		if !m.FromMe && m.Text != "" {
-			texts = append(texts, m.Text)
+		if !m.FromMe {
+			if text := translatableMessageText(m); text != "" {
+				texts = append(texts, text)
+			}
 		}
 	}
 	threadLang, confident := translate.DetectThreadLanguage(texts)
@@ -1612,8 +1614,11 @@ func (sm *SessionManager) translateScreenMessages(msgs []Message) {
 				} else {
 					continue
 				}
-			} else if msg.Text == "" || msg.Kind != MessageKindText {
-				continue
+			} else {
+				msg.Text = translatableMessageText(msg)
+				if msg.Text == "" {
+					continue
+				}
 			}
 			if _, ok := sm.db.GetTranslation(msg.Id); ok {
 				sm.translateIncoming(msg)
@@ -1712,6 +1717,7 @@ func (sm *SessionManager) transcribeAndTranslate(msg Message) {
 // looked English. The classifier in translate/detect.go handles all of
 // that now with a softer thread prior plus per-message overrides.
 func (sm *SessionManager) translateIncoming(msg Message) {
+	msg.Text = translatableMessageText(msg)
 	if msg.Text == "" || sm.Translator == nil || !sm.Translator.IsReady() {
 		return
 	}
@@ -1757,6 +1763,7 @@ func (sm *SessionManager) translateIncoming(msg Message) {
 // would otherwise hit the cache and yield the (potentially wrong) old
 // translation.
 func (sm *SessionManager) translateMessageForce(msg Message) {
+	msg.Text = translatableMessageText(msg)
 	if msg.Text == "" || sm.Translator == nil || !sm.Translator.IsReady() {
 		return
 	}
@@ -1797,8 +1804,10 @@ func (sm *SessionManager) detectThreadLanguage(chatID string) (string, bool) {
 	msgs := sm.db.GetMessages(chatID)
 	texts := make([]string, 0, len(msgs))
 	for _, m := range msgs {
-		if !m.FromMe && m.Text != "" {
-			texts = append(texts, m.Text)
+		if !m.FromMe {
+			if text := translatableMessageText(m); text != "" {
+				texts = append(texts, text)
+			}
 		}
 	}
 	return translate.DetectThreadLanguage(texts)
@@ -2341,7 +2350,7 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 
 	if isNew && msg.Kind == MessageKindAudio && eh.sm.Transcriber != nil && eh.sm.Transcriber.IsReady() {
 		go eh.sm.transcribeAndTranslate(msg)
-	} else if isNew && msg.Kind == MessageKindText && msg.Text != "" && eh.sm.Translator != nil && eh.sm.Translator.IsReady() {
+	} else if isNew && translatableMessageText(msg) != "" && eh.sm.Translator != nil && eh.sm.Translator.IsReady() {
 		go func() {
 			eh.sm.translateIncoming(msg)
 			eh.sm.db.SaveTranslationCache()
@@ -2992,4 +3001,54 @@ func mediaDisplayText(kind MessageKind, fileName, caption string) string {
 		parts = append(parts, caption)
 	}
 	return strings.Join(parts, " ")
+}
+
+// translatableMessageText returns only the linguistic content of a message.
+// Media messages keep their captions in Text behind a display marker such as
+// "[IMAGE]". Treating only MessageKindText as translatable silently skipped
+// those captions, while passing the marker to language detection polluted the
+// classifier and the LLM prompt. The helper is intentionally idempotent so it
+// also accepts a message whose caption was already normalized by a caller.
+func translatableMessageText(msg Message) string {
+	text := strings.TrimSpace(msg.Text)
+	switch msg.Kind {
+	case MessageKindText:
+		return text
+	case MessageKindImage:
+		return trimMediaDisplayPrefix(text, "[IMAGE]")
+	case MessageKindVideo:
+		return trimMediaDisplayPrefix(text, "[VIDEO]")
+	case MessageKindDocument:
+		text = trimMediaDisplayPrefix(text, "[DOCUMENT]")
+		fileName := strings.TrimSpace(msg.FileName)
+		if fileName == "" {
+			return text
+		}
+		if text == fileName {
+			return ""
+		}
+		if strings.HasPrefix(text, fileName+" ") {
+			return strings.TrimSpace(strings.TrimPrefix(text, fileName))
+		}
+		return text
+	case MessageKindAudio:
+		// The stored audio display marker is not language. A caller may replace
+		// it with a Whisper transcript before reaching this helper.
+		if strings.HasPrefix(text, "[AUDIO") {
+			return ""
+		}
+		return text
+	default:
+		return ""
+	}
+}
+
+func trimMediaDisplayPrefix(text, label string) string {
+	if text == label {
+		return ""
+	}
+	if strings.HasPrefix(text, label+" ") {
+		return strings.TrimSpace(strings.TrimPrefix(text, label))
+	}
+	return text
 }
