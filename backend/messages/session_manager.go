@@ -2,6 +2,7 @@ package messages
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 var urlPattern = regexp.MustCompile(`https?://[^\s]+`)
@@ -2347,6 +2349,9 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 	if !ok {
 		return
 	}
+	if poll := pollCreationFromMessage(evt.Message); poll != nil && evt.SourceWebMsg != nil {
+		msg.PollOptions = pollOptionsFromHistory(poll, evt.SourceWebMsg.GetPollUpdates())
+	}
 
 	switch action {
 	case "revoke":
@@ -2662,6 +2667,7 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			}
 			parsed, err := eh.sm.client.ParseWebMessage(chatJID, webMsg)
 			if err != nil {
+				fmt.Fprintf(os.Stdout, "[history-sync] message parse failed payload=%s error=%q\n", messagePayloadNames(webMsg.GetMessage()), err)
 				continue
 			}
 			if update, isReaction := eh.reactionUpdateFromEvent(parsed); isReaction {
@@ -2672,7 +2678,13 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			}
 			msg, action, ok := eh.normalizeEventMessage(parsed)
 			if !ok || action != "" {
+				if !ok {
+					fmt.Fprintf(os.Stdout, "[history-sync] unsupported payload=%s\n", messagePayloadNames(parsed.Message))
+				}
 				continue
+			}
+			if poll := pollCreationFromMessage(parsed.Message); poll != nil {
+				msg.PollOptions = pollOptionsFromHistory(poll, webMsg.GetPollUpdates())
 			}
 			if msg.FromMe {
 				msg.Status = statusFromWebInfo(webMsg.GetStatus())
@@ -2926,9 +2938,116 @@ func (eh *eventHandler) messageFromInfo(info types.MessageInfo, raw *waProto.Mes
 		msg.Text = mediaDisplayText(MessageKindDocument, doc.GetFileName(), doc.GetCaption())
 		msg.Forwarded = doc.GetContextInfo().GetIsForwarded()
 		return msg, true
+	case pollCreationFromMessage(raw) != nil:
+		poll := pollCreationFromMessage(raw)
+		msg.Kind = MessageKindPoll
+		msg.Text = poll.GetName()
+		msg.PollSelectableOptionsCount = poll.GetSelectableOptionsCount()
+		msg.PollOptions = pollOptionsFromHistory(poll, nil)
+		msg.Forwarded = poll.GetContextInfo().GetIsForwarded()
+		return msg, true
 	default:
 		return Message{}, false
 	}
+}
+
+func pollCreationFromMessage(raw *waProto.Message) *waProto.PollCreationMessage {
+	if raw == nil {
+		return nil
+	}
+	for _, poll := range []*waProto.PollCreationMessage{
+		raw.GetPollCreationMessage(),
+		raw.GetPollCreationMessageV2(),
+		raw.GetPollCreationMessageV3(),
+		raw.GetPollCreationMessageV5(),
+		raw.GetPollCreationMessageV6(),
+	} {
+		if poll != nil {
+			return poll
+		}
+	}
+	if wrapped := raw.GetPollCreationMessageV4(); wrapped != nil {
+		return pollCreationFromMessage(wrapped.GetMessage())
+	}
+	return nil
+}
+
+func messagePayloadNames(raw *waProto.Message) string {
+	if raw == nil {
+		return "none"
+	}
+	fields := make([]string, 0, 2)
+	raw.ProtoReflect().Range(func(field protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+		fields = append(fields, string(field.Name()))
+		return true
+	})
+	if len(fields) == 0 {
+		return "empty"
+	}
+	return strings.Join(fields, ",")
+}
+
+type pollVoteSnapshot struct {
+	timestamp int64
+	options   [][]byte
+}
+
+// pollOptionsFromHistory combines a poll's option definitions with the
+// decrypted aggregate vote updates carried by WebMessageInfo. WhatsApp keeps
+// only each participant's latest vote, including an empty selection used to
+// retract a vote.
+func pollOptionsFromHistory(poll *waProto.PollCreationMessage, updates []*waWeb.PollUpdate) []PollOption {
+	if poll == nil {
+		return nil
+	}
+	latestBySender := make(map[string]pollVoteSnapshot)
+	for index, update := range updates {
+		key := update.GetPollUpdateMessageKey()
+		vote := update.GetVote()
+		if key == nil || vote == nil {
+			continue
+		}
+		senderID := canonicalMessageJID(key.GetParticipant())
+		if key.GetFromMe() {
+			senderID = "me"
+		} else if senderID == "" {
+			senderID = canonicalMessageJID(key.GetRemoteJID())
+		}
+		if senderID == "" {
+			senderID = fmt.Sprintf("unknown-voter-%d", index)
+		}
+		timestamp := update.GetServerTimestampMS()
+		if timestamp == 0 {
+			timestamp = update.GetSenderTimestampMS()
+		}
+		if previous, exists := latestBySender[senderID]; exists && previous.timestamp > timestamp {
+			continue
+		}
+		latestBySender[senderID] = pollVoteSnapshot{timestamp: timestamp, options: vote.GetSelectedOptions()}
+	}
+
+	counts := make(map[string]uint32)
+	selectedByMe := make(map[string]bool)
+	for senderID, snapshot := range latestBySender {
+		for _, optionHash := range snapshot.options {
+			key := string(optionHash)
+			counts[key]++
+			if senderID == "me" {
+				selectedByMe[key] = true
+			}
+		}
+	}
+
+	options := make([]PollOption, 0, len(poll.GetOptions()))
+	for _, option := range poll.GetOptions() {
+		name := option.GetOptionName()
+		hash := sha256.Sum256([]byte(name))
+		key := string(hash[:])
+		options = append(options, PollOption{
+			Text: name, Votes: counts[key], Selected: selectedByMe[key],
+		})
+	}
+	return options
 }
 
 func (eh *eventHandler) contactForMessage(info types.MessageInfo) (string, string, string) {

@@ -30,6 +30,7 @@ const (
 	MessageKind_AUDIO    MessageKind = 3
 	MessageKind_DOCUMENT MessageKind = 4
 	MessageKind_UNKNOWN  MessageKind = 5
+	MessageKind_POLL     MessageKind = 6
 )
 
 // Enum value maps for MessageKind.
@@ -41,6 +42,7 @@ var (
 		3: "AUDIO",
 		4: "DOCUMENT",
 		5: "UNKNOWN",
+		6: "POLL",
 	}
 	MessageKind_value = map[string]int32{
 		"TEXT":     0,
@@ -49,6 +51,7 @@ var (
 		"AUDIO":    3,
 		"DOCUMENT": 4,
 		"UNKNOWN":  5,
+		"POLL":     6,
 	}
 )
 
@@ -3279,25 +3282,27 @@ func (x *ChatProto) GetPinned() bool {
 }
 
 type MessageProto struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	ChatId        string                 `protobuf:"bytes,2,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
-	SenderId      string                 `protobuf:"bytes,3,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`
-	ContactId     string                 `protobuf:"bytes,4,opt,name=contact_id,json=contactId,proto3" json:"contact_id,omitempty"`
-	ContactName   string                 `protobuf:"bytes,5,opt,name=contact_name,json=contactName,proto3" json:"contact_name,omitempty"`
-	ContactShort  string                 `protobuf:"bytes,6,opt,name=contact_short,json=contactShort,proto3" json:"contact_short,omitempty"`
-	Timestamp     uint64                 `protobuf:"varint,7,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	FromMe        bool                   `protobuf:"varint,8,opt,name=from_me,json=fromMe,proto3" json:"from_me,omitempty"`
-	Forwarded     bool                   `protobuf:"varint,9,opt,name=forwarded,proto3" json:"forwarded,omitempty"`
-	Text          string                 `protobuf:"bytes,10,opt,name=text,proto3" json:"text,omitempty"`
-	Kind          MessageKind            `protobuf:"varint,11,opt,name=kind,proto3,enum=whatscli.MessageKind" json:"kind,omitempty"`
-	MimeType      string                 `protobuf:"bytes,12,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
-	FileName      string                 `protobuf:"bytes,13,opt,name=file_name,json=fileName,proto3" json:"file_name,omitempty"`
-	Unread        bool                   `protobuf:"varint,14,opt,name=unread,proto3" json:"unread,omitempty"`
-	Status        MessageStatus          `protobuf:"varint,15,opt,name=status,proto3,enum=whatscli.MessageStatus" json:"status,omitempty"`
-	Reactions     []*ReactionProto       `protobuf:"bytes,16,rep,name=reactions,proto3" json:"reactions,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                      protoimpl.MessageState `protogen:"open.v1"`
+	Id                         string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	ChatId                     string                 `protobuf:"bytes,2,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
+	SenderId                   string                 `protobuf:"bytes,3,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`
+	ContactId                  string                 `protobuf:"bytes,4,opt,name=contact_id,json=contactId,proto3" json:"contact_id,omitempty"`
+	ContactName                string                 `protobuf:"bytes,5,opt,name=contact_name,json=contactName,proto3" json:"contact_name,omitempty"`
+	ContactShort               string                 `protobuf:"bytes,6,opt,name=contact_short,json=contactShort,proto3" json:"contact_short,omitempty"`
+	Timestamp                  uint64                 `protobuf:"varint,7,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	FromMe                     bool                   `protobuf:"varint,8,opt,name=from_me,json=fromMe,proto3" json:"from_me,omitempty"`
+	Forwarded                  bool                   `protobuf:"varint,9,opt,name=forwarded,proto3" json:"forwarded,omitempty"`
+	Text                       string                 `protobuf:"bytes,10,opt,name=text,proto3" json:"text,omitempty"`
+	Kind                       MessageKind            `protobuf:"varint,11,opt,name=kind,proto3,enum=whatscli.MessageKind" json:"kind,omitempty"`
+	MimeType                   string                 `protobuf:"bytes,12,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	FileName                   string                 `protobuf:"bytes,13,opt,name=file_name,json=fileName,proto3" json:"file_name,omitempty"`
+	Unread                     bool                   `protobuf:"varint,14,opt,name=unread,proto3" json:"unread,omitempty"`
+	Status                     MessageStatus          `protobuf:"varint,15,opt,name=status,proto3,enum=whatscli.MessageStatus" json:"status,omitempty"`
+	Reactions                  []*ReactionProto       `protobuf:"bytes,16,rep,name=reactions,proto3" json:"reactions,omitempty"`
+	PollOptions                []*PollOptionProto     `protobuf:"bytes,17,rep,name=poll_options,json=pollOptions,proto3" json:"poll_options,omitempty"`
+	PollSelectableOptionsCount uint32                 `protobuf:"varint,18,opt,name=poll_selectable_options_count,json=pollSelectableOptionsCount,proto3" json:"poll_selectable_options_count,omitempty"`
+	unknownFields              protoimpl.UnknownFields
+	sizeCache                  protoimpl.SizeCache
 }
 
 func (x *MessageProto) Reset() {
@@ -3442,6 +3447,20 @@ func (x *MessageProto) GetReactions() []*ReactionProto {
 	return nil
 }
 
+func (x *MessageProto) GetPollOptions() []*PollOptionProto {
+	if x != nil {
+		return x.PollOptions
+	}
+	return nil
+}
+
+func (x *MessageProto) GetPollSelectableOptionsCount() uint32 {
+	if x != nil {
+		return x.PollSelectableOptionsCount
+	}
+	return 0
+}
+
 // One participant's current reaction to a message. WhatsApp permits at most
 // one reaction per participant; sending an empty reaction removes it.
 type ReactionProto struct {
@@ -3494,6 +3513,66 @@ func (x *ReactionProto) GetEmoji() string {
 		return x.Emoji
 	}
 	return ""
+}
+
+type PollOptionProto struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	Votes         uint32                 `protobuf:"varint,2,opt,name=votes,proto3" json:"votes,omitempty"`
+	Selected      bool                   `protobuf:"varint,3,opt,name=selected,proto3" json:"selected,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PollOptionProto) Reset() {
+	*x = PollOptionProto{}
+	mi := &file_whatscli_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PollOptionProto) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PollOptionProto) ProtoMessage() {}
+
+func (x *PollOptionProto) ProtoReflect() protoreflect.Message {
+	mi := &file_whatscli_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PollOptionProto.ProtoReflect.Descriptor instead.
+func (*PollOptionProto) Descriptor() ([]byte, []int) {
+	return file_whatscli_proto_rawDescGZIP(), []int{51}
+}
+
+func (x *PollOptionProto) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *PollOptionProto) GetVotes() uint32 {
+	if x != nil {
+		return x.Votes
+	}
+	return 0
+}
+
+func (x *PollOptionProto) GetSelected() bool {
+	if x != nil {
+		return x.Selected
+	}
+	return false
 }
 
 var File_whatscli_proto protoreflect.FileDescriptor
@@ -3717,7 +3796,7 @@ const file_whatscli_proto_rawDesc = "" +
 	"\x06unread\x18\x04 \x01(\x05R\x06unread\x12!\n" +
 	"\flast_message\x18\x05 \x01(\x03R\vlastMessage\x12\x1a\n" +
 	"\barchived\x18\x06 \x01(\bR\barchived\x12\x16\n" +
-	"\x06pinned\x18\a \x01(\bR\x06pinned\"\x89\x04\n" +
+	"\x06pinned\x18\a \x01(\bR\x06pinned\"\x8a\x05\n" +
 	"\fMessageProto\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
 	"\achat_id\x18\x02 \x01(\tR\x06chatId\x12\x1b\n" +
@@ -3736,17 +3815,24 @@ const file_whatscli_proto_rawDesc = "" +
 	"\tfile_name\x18\r \x01(\tR\bfileName\x12\x16\n" +
 	"\x06unread\x18\x0e \x01(\bR\x06unread\x12/\n" +
 	"\x06status\x18\x0f \x01(\x0e2\x17.whatscli.MessageStatusR\x06status\x125\n" +
-	"\treactions\x18\x10 \x03(\v2\x17.whatscli.ReactionProtoR\treactions\"B\n" +
+	"\treactions\x18\x10 \x03(\v2\x17.whatscli.ReactionProtoR\treactions\x12<\n" +
+	"\fpoll_options\x18\x11 \x03(\v2\x19.whatscli.PollOptionProtoR\vpollOptions\x12A\n" +
+	"\x1dpoll_selectable_options_count\x18\x12 \x01(\rR\x1apollSelectableOptionsCount\"B\n" +
 	"\rReactionProto\x12\x1b\n" +
 	"\tsender_id\x18\x01 \x01(\tR\bsenderId\x12\x14\n" +
-	"\x05emoji\x18\x02 \x01(\tR\x05emoji*S\n" +
+	"\x05emoji\x18\x02 \x01(\tR\x05emoji\"W\n" +
+	"\x0fPollOptionProto\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\x12\x14\n" +
+	"\x05votes\x18\x02 \x01(\rR\x05votes\x12\x1a\n" +
+	"\bselected\x18\x03 \x01(\bR\bselected*]\n" +
 	"\vMessageKind\x12\b\n" +
 	"\x04TEXT\x10\x00\x12\t\n" +
 	"\x05IMAGE\x10\x01\x12\t\n" +
 	"\x05VIDEO\x10\x02\x12\t\n" +
 	"\x05AUDIO\x10\x03\x12\f\n" +
 	"\bDOCUMENT\x10\x04\x12\v\n" +
-	"\aUNKNOWN\x10\x05*\x97\x01\n" +
+	"\aUNKNOWN\x10\x05\x12\b\n" +
+	"\x04POLL\x10\x06*\x97\x01\n" +
 	"\rMessageStatus\x12\x1a\n" +
 	"\x16MESSAGE_STATUS_UNKNOWN\x10\x00\x12\x1a\n" +
 	"\x16MESSAGE_STATUS_PENDING\x10\x01\x12\x17\n" +
@@ -3772,7 +3858,7 @@ func file_whatscli_proto_rawDescGZIP() []byte {
 }
 
 var file_whatscli_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_whatscli_proto_msgTypes = make([]protoimpl.MessageInfo, 51)
+var file_whatscli_proto_msgTypes = make([]protoimpl.MessageInfo, 52)
 var file_whatscli_proto_goTypes = []any{
 	(MessageKind)(0),            // 0: whatscli.MessageKind
 	(MessageStatus)(0),          // 1: whatscli.MessageStatus
@@ -3829,6 +3915,7 @@ var file_whatscli_proto_goTypes = []any{
 	(*ChatProto)(nil),           // 52: whatscli.ChatProto
 	(*MessageProto)(nil),        // 53: whatscli.MessageProto
 	(*ReactionProto)(nil),       // 54: whatscli.ReactionProto
+	(*PollOptionProto)(nil),     // 55: whatscli.PollOptionProto
 }
 var file_whatscli_proto_depIdxs = []int32{
 	5,  // 0: whatscli.ClientMessage.handshake:type_name -> whatscli.ConnectHandshake
@@ -3882,19 +3969,20 @@ var file_whatscli_proto_depIdxs = []int32{
 	0,  // 48: whatscli.MessageProto.kind:type_name -> whatscli.MessageKind
 	1,  // 49: whatscli.MessageProto.status:type_name -> whatscli.MessageStatus
 	54, // 50: whatscli.MessageProto.reactions:type_name -> whatscli.ReactionProto
-	4,  // 51: whatscli.WhatsCLI.EventStream:input_type -> whatscli.ClientMessage
-	43, // 52: whatscli.WhatsCLI.GetMedia:input_type -> whatscli.MediaRequest
-	45, // 53: whatscli.WhatsCLI.GetAvatar:input_type -> whatscli.AvatarRequest
-	12, // 54: whatscli.WhatsCLI.Login:input_type -> whatscli.LoginRequest
-	29, // 55: whatscli.WhatsCLI.EventStream:output_type -> whatscli.ServerEvent
-	44, // 56: whatscli.WhatsCLI.GetMedia:output_type -> whatscli.MediaChunk
-	46, // 57: whatscli.WhatsCLI.GetAvatar:output_type -> whatscli.AvatarResponse
-	47, // 58: whatscli.WhatsCLI.Login:output_type -> whatscli.LoginEvent
-	55, // [55:59] is the sub-list for method output_type
-	51, // [51:55] is the sub-list for method input_type
-	51, // [51:51] is the sub-list for extension type_name
-	51, // [51:51] is the sub-list for extension extendee
-	0,  // [0:51] is the sub-list for field type_name
+	55, // 51: whatscli.MessageProto.poll_options:type_name -> whatscli.PollOptionProto
+	4,  // 52: whatscli.WhatsCLI.EventStream:input_type -> whatscli.ClientMessage
+	43, // 53: whatscli.WhatsCLI.GetMedia:input_type -> whatscli.MediaRequest
+	45, // 54: whatscli.WhatsCLI.GetAvatar:input_type -> whatscli.AvatarRequest
+	12, // 55: whatscli.WhatsCLI.Login:input_type -> whatscli.LoginRequest
+	29, // 56: whatscli.WhatsCLI.EventStream:output_type -> whatscli.ServerEvent
+	44, // 57: whatscli.WhatsCLI.GetMedia:output_type -> whatscli.MediaChunk
+	46, // 58: whatscli.WhatsCLI.GetAvatar:output_type -> whatscli.AvatarResponse
+	47, // 59: whatscli.WhatsCLI.Login:output_type -> whatscli.LoginEvent
+	56, // [56:60] is the sub-list for method output_type
+	52, // [52:56] is the sub-list for method input_type
+	52, // [52:52] is the sub-list for extension type_name
+	52, // [52:52] is the sub-list for extension extendee
+	0,  // [0:52] is the sub-list for field type_name
 }
 
 func init() { file_whatscli_proto_init() }
@@ -3955,7 +4043,7 @@ func file_whatscli_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_whatscli_proto_rawDesc), len(file_whatscli_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   51,
+			NumMessages:   52,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

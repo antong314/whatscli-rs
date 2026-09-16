@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"crypto/sha256"
 	"testing"
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
@@ -171,6 +172,45 @@ func TestSourceWebMessageReactionsRefreshNewestMessage(t *testing.T) {
 	msg, found := eh.applySourceReactions(evt, "newest")
 	if !found || len(msg.Reactions) != 2 {
 		t.Fatalf("expected newest-message reactions from source metadata, got %#v", msg.Reactions)
+	}
+}
+
+func TestPollCreationIncludesHistoryVoteTotals(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	eh := &eventHandler{sm: &SessionManager{db: db}}
+	poll := &waProto.PollCreationMessage{
+		Name: proto.String("How many push-ups?"),
+		Options: []*waProto.PollCreationMessage_Option{
+			{OptionName: proto.String("5")},
+			{OptionName: proto.String("10")},
+		},
+		SelectableOptionsCount: proto.Uint32(1),
+	}
+	selected := sha256.Sum256([]byte("10"))
+	updates := []*waWeb.PollUpdate{
+		{
+			PollUpdateMessageKey: &waCommon.MessageKey{Participant: proto.String("15557654321@s.whatsapp.net")},
+			Vote:                 &waProto.PollVoteMessage{SelectedOptions: [][]byte{selected[:]}},
+			ServerTimestampMS:    proto.Int64(1),
+		},
+		{
+			PollUpdateMessageKey: &waCommon.MessageKey{FromMe: proto.Bool(true)},
+			Vote:                 &waProto.PollVoteMessage{SelectedOptions: [][]byte{selected[:]}},
+			ServerTimestampMS:    proto.Int64(2),
+		},
+	}
+
+	msg, ok := eh.messageFromInfo(types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: types.NewJID("group", types.GroupServer)},
+		ID:            "poll-id",
+	}, &waProto.Message{PollCreationMessageV3: poll})
+	if !ok || msg.Kind != MessageKindPoll || msg.Text != "How many push-ups?" {
+		t.Fatalf("poll creation was not normalized: %#v", msg)
+	}
+	msg.PollOptions = pollOptionsFromHistory(poll, updates)
+	if len(msg.PollOptions) != 2 || msg.PollOptions[1].Votes != 2 || !msg.PollOptions[1].Selected {
+		t.Fatalf("unexpected poll totals: %#v", msg.PollOptions)
 	}
 }
 

@@ -100,6 +100,7 @@ const (
 	MessageKindAudio    MessageKind = "audio"
 	MessageKindDocument MessageKind = "document"
 	MessageKindUnknown  MessageKind = "unknown"
+	MessageKindPoll     MessageKind = "poll"
 )
 
 // MessageStatus is the send/delivery state of an OUTGOING message — the
@@ -132,23 +133,25 @@ func statusRank(s MessageStatus) int {
 
 // internal message representation to abstract from message lib
 type Message struct {
-	Id           string
-	ChatId       string // the source of the message (group id or contact id)
-	SenderId     string
-	ContactId    string
-	ContactName  string
-	ContactShort string
-	Timestamp    uint64
-	FromMe       bool
-	Forwarded    bool
-	Text         string
-	Kind         MessageKind
-	MimeType     string
-	FileName     string
-	Unread       bool
-	Status       MessageStatus
-	Reactions    []MessageReaction
-	RawMessage   *waProto.Message
+	Id                         string
+	ChatId                     string // the source of the message (group id or contact id)
+	SenderId                   string
+	ContactId                  string
+	ContactName                string
+	ContactShort               string
+	Timestamp                  uint64
+	FromMe                     bool
+	Forwarded                  bool
+	Text                       string
+	Kind                       MessageKind
+	MimeType                   string
+	FileName                   string
+	Unread                     bool
+	Status                     MessageStatus
+	Reactions                  []MessageReaction
+	PollOptions                []PollOption
+	PollSelectableOptionsCount uint32
+	RawMessage                 *waProto.Message
 }
 
 // MessageReaction is one participant's current reaction to a message.
@@ -157,6 +160,13 @@ type Message struct {
 type MessageReaction struct {
 	SenderId string `json:"sender_id"`
 	Emoji    string `json:"emoji"`
+}
+
+// PollOption is the current read-only state of one option in a WhatsApp poll.
+type PollOption struct {
+	Text     string `json:"text"`
+	Votes    uint32 `json:"votes"`
+	Selected bool   `json:"selected,omitempty"`
 }
 
 // internal contact representation to abstract from message lib

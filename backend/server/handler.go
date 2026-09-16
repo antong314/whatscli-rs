@@ -318,23 +318,31 @@ func messageToProto(m messages.Message) *pb.MessageProto {
 			Emoji:    reaction.Emoji,
 		})
 	}
+	pollOptions := make([]*pb.PollOptionProto, 0, len(m.PollOptions))
+	for _, option := range m.PollOptions {
+		pollOptions = append(pollOptions, &pb.PollOptionProto{
+			Text: option.Text, Votes: option.Votes, Selected: option.Selected,
+		})
+	}
 	return &pb.MessageProto{
-		Id:           m.Id,
-		ChatId:       m.ChatId,
-		SenderId:     m.SenderId,
-		ContactId:    m.ContactId,
-		ContactName:  m.ContactName,
-		ContactShort: m.ContactShort,
-		Timestamp:    m.Timestamp,
-		FromMe:       m.FromMe,
-		Forwarded:    m.Forwarded,
-		Text:         m.Text,
-		Kind:         messageKindToProto(m.Kind),
-		MimeType:     m.MimeType,
-		FileName:     m.FileName,
-		Unread:       m.Unread,
-		Status:       messageStatusToProto(m.Status),
-		Reactions:    reactions,
+		Id:                         m.Id,
+		ChatId:                     m.ChatId,
+		SenderId:                   m.SenderId,
+		ContactId:                  m.ContactId,
+		ContactName:                m.ContactName,
+		ContactShort:               m.ContactShort,
+		Timestamp:                  m.Timestamp,
+		FromMe:                     m.FromMe,
+		Forwarded:                  m.Forwarded,
+		Text:                       m.Text,
+		Kind:                       messageKindToProto(m.Kind),
+		MimeType:                   m.MimeType,
+		FileName:                   m.FileName,
+		Unread:                     m.Unread,
+		Status:                     messageStatusToProto(m.Status),
+		Reactions:                  reactions,
+		PollOptions:                pollOptions,
+		PollSelectableOptionsCount: m.PollSelectableOptionsCount,
 	}
 }
 
@@ -365,6 +373,8 @@ func messageKindToProto(k messages.MessageKind) pb.MessageKind {
 		return pb.MessageKind_AUDIO
 	case messages.MessageKindDocument:
 		return pb.MessageKind_DOCUMENT
+	case messages.MessageKindPoll:
+		return pb.MessageKind_POLL
 	default:
 		return pb.MessageKind_UNKNOWN
 	}

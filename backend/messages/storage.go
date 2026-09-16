@@ -92,6 +92,10 @@ func (md *MessageDatabase) AddMessage(msg Message, markUnread bool) bool {
 		if len(msg.Reactions) > 0 {
 			existing.Reactions = normalizedReactions(msg.Reactions)
 		}
+		if len(msg.PollOptions) > 0 {
+			existing.PollOptions = append([]PollOption(nil), msg.PollOptions...)
+			existing.PollSelectableOptionsCount = msg.PollSelectableOptionsCount
+		}
 		// Only bump the chat counter on a false→true transition: re-delivered
 		// messages (offline sync, cache reload) must not count twice.
 		newlyUnread := markUnread && !existing.Unread
@@ -855,23 +859,25 @@ func (md *MessageDatabase) LoadChatCache() {
 }
 
 type messageCacheEntry struct {
-	Id           string            `json:"id"`
-	ChatId       string            `json:"chat_id"`
-	SenderId     string            `json:"sender_id,omitempty"`
-	ContactId    string            `json:"contact_id,omitempty"`
-	ContactName  string            `json:"contact_name,omitempty"`
-	ContactShort string            `json:"contact_short,omitempty"`
-	Timestamp    uint64            `json:"ts"`
-	FromMe       bool              `json:"from_me,omitempty"`
-	Forwarded    bool              `json:"forwarded,omitempty"`
-	Text         string            `json:"text,omitempty"`
-	Kind         string            `json:"kind,omitempty"`
-	MimeType     string            `json:"mime,omitempty"`
-	FileName     string            `json:"file,omitempty"`
-	RawProto     string            `json:"raw,omitempty"`
-	Unread       bool              `json:"unread,omitempty"`
-	Status       string            `json:"status,omitempty"`
-	Reactions    []MessageReaction `json:"reactions,omitempty"`
+	Id                         string            `json:"id"`
+	ChatId                     string            `json:"chat_id"`
+	SenderId                   string            `json:"sender_id,omitempty"`
+	ContactId                  string            `json:"contact_id,omitempty"`
+	ContactName                string            `json:"contact_name,omitempty"`
+	ContactShort               string            `json:"contact_short,omitempty"`
+	Timestamp                  uint64            `json:"ts"`
+	FromMe                     bool              `json:"from_me,omitempty"`
+	Forwarded                  bool              `json:"forwarded,omitempty"`
+	Text                       string            `json:"text,omitempty"`
+	Kind                       string            `json:"kind,omitempty"`
+	MimeType                   string            `json:"mime,omitempty"`
+	FileName                   string            `json:"file,omitempty"`
+	RawProto                   string            `json:"raw,omitempty"`
+	Unread                     bool              `json:"unread,omitempty"`
+	Status                     string            `json:"status,omitempty"`
+	Reactions                  []MessageReaction `json:"reactions,omitempty"`
+	PollOptions                []PollOption      `json:"poll_options,omitempty"`
+	PollSelectableOptionsCount uint32            `json:"poll_selectable_options_count,omitempty"`
 }
 
 // SaveMessageCache persists all in-memory messages to disk.
@@ -880,22 +886,24 @@ func (md *MessageDatabase) SaveMessageCache() {
 	entries := make([]messageCacheEntry, 0, len(md.messagesById))
 	for _, msg := range md.messagesById {
 		entry := messageCacheEntry{
-			Id:           msg.Id,
-			ChatId:       msg.ChatId,
-			SenderId:     msg.SenderId,
-			ContactId:    msg.ContactId,
-			ContactName:  msg.ContactName,
-			ContactShort: msg.ContactShort,
-			Timestamp:    msg.Timestamp,
-			FromMe:       msg.FromMe,
-			Forwarded:    msg.Forwarded,
-			Text:         msg.Text,
-			Kind:         string(msg.Kind),
-			MimeType:     msg.MimeType,
-			FileName:     msg.FileName,
-			Unread:       msg.Unread,
-			Status:       string(msg.Status),
-			Reactions:    msg.Reactions,
+			Id:                         msg.Id,
+			ChatId:                     msg.ChatId,
+			SenderId:                   msg.SenderId,
+			ContactId:                  msg.ContactId,
+			ContactName:                msg.ContactName,
+			ContactShort:               msg.ContactShort,
+			Timestamp:                  msg.Timestamp,
+			FromMe:                     msg.FromMe,
+			Forwarded:                  msg.Forwarded,
+			Text:                       msg.Text,
+			Kind:                       string(msg.Kind),
+			MimeType:                   msg.MimeType,
+			FileName:                   msg.FileName,
+			Unread:                     msg.Unread,
+			Status:                     string(msg.Status),
+			Reactions:                  msg.Reactions,
+			PollOptions:                msg.PollOptions,
+			PollSelectableOptionsCount: msg.PollSelectableOptionsCount,
 		}
 		if msg.RawMessage != nil {
 			if raw, err := proto.Marshal(msg.RawMessage); err == nil {
@@ -925,22 +933,24 @@ func (md *MessageDatabase) LoadMessageCache() {
 	}
 	for _, entry := range entries {
 		msg := Message{
-			Id:           entry.Id,
-			ChatId:       entry.ChatId,
-			SenderId:     entry.SenderId,
-			ContactId:    entry.ContactId,
-			ContactName:  entry.ContactName,
-			ContactShort: entry.ContactShort,
-			Timestamp:    entry.Timestamp,
-			FromMe:       entry.FromMe,
-			Forwarded:    entry.Forwarded,
-			Text:         entry.Text,
-			Kind:         MessageKind(entry.Kind),
-			MimeType:     entry.MimeType,
-			FileName:     entry.FileName,
-			Unread:       entry.Unread,
-			Status:       MessageStatus(entry.Status),
-			Reactions:    entry.Reactions,
+			Id:                         entry.Id,
+			ChatId:                     entry.ChatId,
+			SenderId:                   entry.SenderId,
+			ContactId:                  entry.ContactId,
+			ContactName:                entry.ContactName,
+			ContactShort:               entry.ContactShort,
+			Timestamp:                  entry.Timestamp,
+			FromMe:                     entry.FromMe,
+			Forwarded:                  entry.Forwarded,
+			Text:                       entry.Text,
+			Kind:                       MessageKind(entry.Kind),
+			MimeType:                   entry.MimeType,
+			FileName:                   entry.FileName,
+			Unread:                     entry.Unread,
+			Status:                     MessageStatus(entry.Status),
+			Reactions:                  entry.Reactions,
+			PollOptions:                entry.PollOptions,
+			PollSelectableOptionsCount: entry.PollSelectableOptionsCount,
 		}
 		if entry.RawProto != "" {
 			if raw, err := base64.StdEncoding.DecodeString(entry.RawProto); err == nil {

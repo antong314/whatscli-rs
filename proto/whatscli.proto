@@ -339,6 +339,7 @@ enum MessageKind {
   AUDIO = 3;
   DOCUMENT = 4;
   UNKNOWN = 5;
+  POLL = 6;
 }
 
 // Send/delivery state of an outgoing message (WhatsApp tick marks).
@@ -377,6 +378,8 @@ message MessageProto {
   bool unread = 14;
   MessageStatus status = 15;
   repeated ReactionProto reactions = 16;
+  repeated PollOptionProto poll_options = 17;
+  uint32 poll_selectable_options_count = 18;
 }
 
 // One participant's current reaction to a message. WhatsApp permits at most
@@ -384,4 +387,10 @@ message MessageProto {
 message ReactionProto {
   string sender_id = 1;
   string emoji = 2;
+}
+
+message PollOptionProto {
+  string text = 1;
+  uint32 votes = 2;
+  bool selected = 3;
 }
