@@ -111,6 +111,69 @@ func TestStandaloneHistoryReactionResolvesTargetAndAuthor(t *testing.T) {
 	}
 }
 
+func TestPendingReactionAppliesAfterTargetArrives(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	sm := &SessionManager{
+		db:               db,
+		pendingReactions: make(map[string]map[string]messageReactionUpdate),
+	}
+
+	sm.queuePendingReaction(messageReactionUpdate{
+		targetID: "target-message",
+		senderID: "me",
+		emoji:    "🙋",
+	})
+	if _, found := sm.applyPendingReactionsFor("target-message"); found {
+		t.Fatal("reaction must remain pending while its target is missing")
+	}
+
+	db.AddMessage(Message{Id: "target-message", ChatId: "group@g.us", Text: "Who's in?"}, false)
+	msg, found := sm.applyPendingReactionsFor("target-message")
+	if !found {
+		t.Fatal("expected pending reaction to apply once the target exists")
+	}
+	if len(msg.Reactions) != 1 || msg.Reactions[0].SenderId != "me" || msg.Reactions[0].Emoji != "🙋" {
+		t.Fatalf("unexpected reactions after replay: %#v", msg.Reactions)
+	}
+}
+
+func TestPendingReactionKeepsLatestSenderValue(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	sm := &SessionManager{
+		db:               db,
+		pendingReactions: make(map[string]map[string]messageReactionUpdate),
+	}
+	sm.queuePendingReaction(messageReactionUpdate{targetID: "target", senderID: "me", emoji: "👍"})
+	sm.queuePendingReaction(messageReactionUpdate{targetID: "target", senderID: "me", emoji: "🙋"})
+	db.AddMessage(Message{Id: "target", ChatId: "group@g.us"}, false)
+
+	msg, found := sm.applyPendingReactionsFor("target")
+	if !found || len(msg.Reactions) != 1 || msg.Reactions[0].Emoji != "🙋" {
+		t.Fatalf("expected only the latest pending reaction, got %#v", msg.Reactions)
+	}
+}
+
+func TestSourceWebMessageReactionsRefreshNewestMessage(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	db.AddMessage(Message{Id: "newest", ChatId: "group@g.us", Text: "Who's in?"}, false)
+	eh := &eventHandler{sm: &SessionManager{db: db}}
+	evt := &events.Message{
+		Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: types.NewJID("group", types.GroupServer)}},
+		SourceWebMsg: &waWeb.WebMessageInfo{Reactions: []*waWeb.Reaction{
+			{Key: &waCommon.MessageKey{FromMe: proto.Bool(true)}, Text: proto.String("🙋")},
+			{Key: &waCommon.MessageKey{Participant: proto.String("15557654321@s.whatsapp.net")}, Text: proto.String("🙋")},
+		}},
+	}
+
+	msg, found := eh.applySourceReactions(evt, "newest")
+	if !found || len(msg.Reactions) != 2 {
+		t.Fatalf("expected newest-message reactions from source metadata, got %#v", msg.Reactions)
+	}
+}
+
 func TestChatScreensEqualDetectsVisibleChanges(t *testing.T) {
 	a := []Chat{{Id: "chat", Name: "Alice", Unread: 1, LastMessage: 100}}
 	b := append([]Chat(nil), a...)

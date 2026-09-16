@@ -93,6 +93,12 @@ type SessionManager struct {
 	historyRefreshMu sync.Mutex
 	historyRefreshAt map[string]time.Time
 
+	// pendingReactionMu guards reactions that arrive before their target
+	// message is available. WhatsApp may replay offline reactions immediately
+	// after Connect, while loadRecentChats is still restoring the disk cache.
+	pendingReactionMu sync.Mutex
+	pendingReactions  map[string]map[string]messageReactionUpdate
+
 	// userDisconnected is set when the user explicitly disconnects, so the
 	// connection watchdog doesn't fight their intent by reconnecting.
 	userDisconnected bool
@@ -164,6 +170,7 @@ func (sm *SessionManager) Init(handler UiMessageHandler) {
 	sm.markReadDelay = DefaultMarkReadDelay
 	sm.markReadFn = sm.autoMarkRead
 	sm.historyRefreshAt = make(map[string]time.Time)
+	sm.pendingReactions = make(map[string]map[string]messageReactionUpdate)
 }
 
 // StartManager starts the receiver and message handling goroutine.
@@ -289,13 +296,48 @@ func (sm *SessionManager) refreshSelectedChatHistory(chatID string) {
 
 	go func() {
 		started := time.Now()
-		err := sm.requestChatHistorySync(chatID)
-		if err != nil {
-			fmt.Fprintf(os.Stdout, "[history-refresh] request failed error=%q duration_ms=%d\n", err, time.Since(started).Milliseconds())
+		latestErr := sm.requestLatestMessageRefresh(chatID)
+		historyErr := sm.requestChatHistorySync(chatID)
+		if latestErr != nil || historyErr != nil {
+			fmt.Fprintf(os.Stdout, "[history-refresh] request failed latest_error=%v history_error=%v duration_ms=%d\n", latestErr, historyErr, time.Since(started).Milliseconds())
 			return
 		}
 		fmt.Fprintf(os.Stdout, "[history-refresh] request sent duration_ms=%d\n", time.Since(started).Milliseconds())
 	}()
+}
+
+// requestLatestMessageRefresh complements BuildHistorySyncRequest, whose
+// response deliberately contains only messages before its anchor. Asking the
+// primary device to resend the anchor provides mutable metadata (especially
+// reactions) for the newest message in a chat too.
+func (sm *SessionManager) requestLatestMessageRefresh(chatID string) error {
+	if sm.client == nil || !sm.client.IsConnected() {
+		return errors.New("not connected")
+	}
+	chatJID, err := types.ParseJID(chatID)
+	if err != nil {
+		return err
+	}
+	if chatJID.Server == types.DefaultUserServer && sm.client.Store != nil && sm.client.Store.LIDs != nil {
+		if lid, lidErr := sm.client.Store.LIDs.GetLIDForPN(context.Background(), chatJID); lidErr == nil && !lid.IsEmpty() {
+			chatJID = lid
+		}
+	}
+	msgs := sm.db.GetMessages(chatID)
+	if len(msgs) == 0 {
+		return errors.New("no anchor message for " + chatID)
+	}
+	last := msgs[len(msgs)-1]
+	sender := types.EmptyJID
+	if !last.FromMe {
+		sender, err = types.ParseJID(last.SenderId)
+		if err != nil {
+			return err
+		}
+	}
+	req := sm.client.BuildUnavailableMessageRequest(chatJID, sender, last.Id)
+	_, err = sm.client.SendPeerMessage(context.Background(), req)
+	return err
 }
 
 // scheduleAutoMarkRead arranges for `chatID` to be marked as read.
@@ -582,6 +624,9 @@ func (sm *SessionManager) loadRecentChats() {
 
 	sm.db.LoadChatCache()
 	sm.db.LoadMessageCache()
+	if applied := sm.applyPendingReactions(); applied > 0 {
+		fmt.Fprintf(os.Stdout, "[reaction] restored pending reactions count=%d\n", applied)
+	}
 	trace("caches loaded")
 	// Unread flags older than WhatsApp's offline-receipt replay window can
 	// never be reconciled with the phone again; drop them so long downtimes
@@ -2320,6 +2365,12 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 	inDwell := eh.sm.hasPendingMarkRead(msg.ChatId)
 	markUnread := !msg.FromMe && (msg.ChatId != eh.sm.currentReceiver || inDwell)
 	isNew := eh.sm.db.AddMessage(msg, markUnread)
+	if updated, found := eh.applySourceReactions(evt, msg.Id); found {
+		msg = updated
+	}
+	if updated, found := eh.sm.applyPendingReactionsFor(msg.Id); found {
+		msg = updated
+	}
 	// Replying from ANY device means the user has read the chat — WhatsApp
 	// clears the badge on reply even when the read-self receipt never
 	// reaches us. Clear up to the reply's own timestamp only, so anything
@@ -2374,6 +2425,17 @@ func (eh *eventHandler) handleLiveReaction(evt *events.Message) bool {
 	updated, changed := eh.sm.db.ApplyMessageReaction(update.targetID, update.senderID, update.emoji)
 	if !changed {
 		if _, exists := eh.sm.db.GetMessage(update.targetID); !exists {
+			eh.sm.queuePendingReaction(update)
+			// Close the narrow race where cache restoration inserted the target
+			// between ApplyMessageReaction and queuePendingReaction.
+			if recovered, found := eh.sm.applyPendingReactionsFor(update.targetID); found {
+				if recovered.ChatId == eh.sm.currentReceiver {
+					eh.sm.uiHandler.NewScreen(eh.sm.getMessages(recovered.ChatId))
+				}
+				eh.sm.scheduleCacheRefresh(false)
+				fmt.Fprintln(os.Stdout, "[reaction] applied after target became available")
+				return true
+			}
 			fmt.Fprintln(os.Stdout, "[reaction] target missing; awaiting history sync")
 		}
 		return true
@@ -2394,6 +2456,92 @@ type messageReactionUpdate struct {
 	targetID string
 	senderID string
 	emoji    string
+}
+
+// queuePendingReaction retains the latest reaction from each sender while its
+// target message is unavailable. A later change or removal replaces the older
+// pending value, matching WhatsApp's one-reaction-per-sender semantics.
+func (sm *SessionManager) queuePendingReaction(update messageReactionUpdate) {
+	if update.targetID == "" || update.senderID == "" {
+		return
+	}
+	sm.pendingReactionMu.Lock()
+	defer sm.pendingReactionMu.Unlock()
+	if sm.pendingReactions == nil {
+		sm.pendingReactions = make(map[string]map[string]messageReactionUpdate)
+	}
+	bySender := sm.pendingReactions[update.targetID]
+	if bySender == nil {
+		bySender = make(map[string]messageReactionUpdate)
+		sm.pendingReactions[update.targetID] = bySender
+	}
+	bySender[canonicalMessageJID(update.senderID)] = update
+}
+
+// takePendingReactions returns pending updates only once the target exists.
+// Keeping the entries when it does not exist lets later history/live delivery
+// complete the association without losing an offline replay.
+func (sm *SessionManager) takePendingReactions(targetID string) []messageReactionUpdate {
+	if _, exists := sm.db.GetMessage(targetID); !exists {
+		return nil
+	}
+	sm.pendingReactionMu.Lock()
+	defer sm.pendingReactionMu.Unlock()
+	bySender := sm.pendingReactions[targetID]
+	if len(bySender) == 0 {
+		return nil
+	}
+	updates := make([]messageReactionUpdate, 0, len(bySender))
+	for _, update := range bySender {
+		updates = append(updates, update)
+	}
+	delete(sm.pendingReactions, targetID)
+	return updates
+}
+
+func (sm *SessionManager) applyPendingReactionsFor(targetID string) (Message, bool) {
+	updates := sm.takePendingReactions(targetID)
+	if len(updates) == 0 {
+		return Message{}, false
+	}
+	for _, update := range updates {
+		sm.db.ApplyMessageReaction(update.targetID, update.senderID, update.emoji)
+	}
+	msg, exists := sm.db.GetMessage(targetID)
+	return msg, exists
+}
+
+func (sm *SessionManager) applyPendingReactions() int {
+	sm.pendingReactionMu.Lock()
+	targets := make([]string, 0, len(sm.pendingReactions))
+	for targetID := range sm.pendingReactions {
+		targets = append(targets, targetID)
+	}
+	sm.pendingReactionMu.Unlock()
+
+	applied := 0
+	for _, targetID := range targets {
+		updates := sm.takePendingReactions(targetID)
+		for _, update := range updates {
+			if _, changed := sm.db.ApplyMessageReaction(update.targetID, update.senderID, update.emoji); changed {
+				applied++
+			}
+		}
+	}
+	return applied
+}
+
+// applySourceReactions consumes the authoritative WebMessageInfo metadata on
+// history/unavailable-message responses. The parsed message body alone does
+// not expose aggregate reactions.
+func (eh *eventHandler) applySourceReactions(evt *events.Message, targetID string) (Message, bool) {
+	if evt == nil || evt.SourceWebMsg == nil {
+		return Message{}, false
+	}
+	reactions := eh.historyReactions(evt.SourceWebMsg.GetReactions(), evt.Info.Chat)
+	eh.sm.db.SetMessageReactions(targetID, reactions)
+	msg, exists := eh.sm.db.GetMessage(targetID)
+	return msg, exists
 }
 
 // reactionUpdateFromEvent normalizes both plaintext and encrypted protocol
@@ -2535,6 +2683,9 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			reactions := eh.historyReactions(webMsg.GetReactions(), chatJID)
 			reactionCount += len(reactions)
 			if eh.sm.db.SetMessageReactions(msg.Id, reactions) {
+				reactionChanges++
+			}
+			if _, found := eh.sm.applyPendingReactionsFor(msg.Id); found {
 				reactionChanges++
 			}
 		}
