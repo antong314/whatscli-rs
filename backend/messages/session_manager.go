@@ -2363,39 +2363,17 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 // It returns true whenever evt is a reaction, including malformed/decryption
 // failures, so a reaction can never surface as an "unsupported" chat message.
 func (eh *eventHandler) handleLiveReaction(evt *events.Message) bool {
-	if evt == nil || evt.Message == nil {
+	update, isReaction := eh.reactionUpdateFromEvent(evt)
+	if !isReaction {
 		return false
 	}
-	reaction := evt.Message.GetReactionMessage()
-	if reaction == nil && evt.Message.GetEncReactionMessage() != nil {
-		if eh.sm.client == nil {
-			fmt.Fprintln(os.Stdout, "[reaction] ignored encrypted reaction: client unavailable")
-			return true
-		}
-		decrypted, err := eh.sm.client.DecryptReaction(context.Background(), evt)
-		if err != nil {
-			fmt.Fprintf(os.Stdout, "[reaction] decrypt failed error=%q\n", err)
-			return true
-		}
-		reaction = decrypted
-	}
-	if reaction == nil {
-		return false
-	}
-
-	targetID := reaction.GetKey().GetID()
-	senderID := eh.resolveLID(evt.Info.Sender).String()
-	if evt.Info.IsFromMe {
-		senderID = "me"
-	}
-	if targetID == "" || senderID == "" {
-		fmt.Fprintf(os.Stdout, "[reaction] ignored malformed target_present=%t sender_present=%t\n", targetID != "", senderID != "")
+	if update.targetID == "" || update.senderID == "" {
 		return true
 	}
 
-	updated, changed := eh.sm.db.ApplyMessageReaction(targetID, senderID, reaction.GetText())
+	updated, changed := eh.sm.db.ApplyMessageReaction(update.targetID, update.senderID, update.emoji)
 	if !changed {
-		if _, exists := eh.sm.db.GetMessage(targetID); !exists {
+		if _, exists := eh.sm.db.GetMessage(update.targetID); !exists {
 			fmt.Fprintln(os.Stdout, "[reaction] target missing; awaiting history sync")
 		}
 		return true
@@ -2405,11 +2383,54 @@ func (eh *eventHandler) handleLiveReaction(evt *events.Message) bool {
 	}
 	eh.sm.scheduleCacheRefresh(false)
 	action := "set"
-	if reaction.GetText() == "" {
+	if update.emoji == "" {
 		action = "remove"
 	}
 	fmt.Fprintf(os.Stdout, "[reaction] applied action=%s open_chat=%t\n", action, updated.ChatId == eh.sm.currentReceiver)
 	return true
+}
+
+type messageReactionUpdate struct {
+	targetID string
+	senderID string
+	emoji    string
+}
+
+// reactionUpdateFromEvent normalizes both plaintext and encrypted protocol
+// messages. History sync includes reactions as standalone messages (not only
+// in WebMessageInfo.reactions), so live delivery and history replay must share
+// the exact same decoding and participant resolution.
+func (eh *eventHandler) reactionUpdateFromEvent(evt *events.Message) (messageReactionUpdate, bool) {
+	if evt == nil || evt.Message == nil {
+		return messageReactionUpdate{}, false
+	}
+	reaction := evt.Message.GetReactionMessage()
+	if reaction == nil && evt.Message.GetEncReactionMessage() != nil {
+		if eh.sm.client == nil {
+			fmt.Fprintln(os.Stdout, "[reaction] ignored encrypted reaction: client unavailable")
+			return messageReactionUpdate{}, true
+		}
+		decrypted, err := eh.sm.client.DecryptReaction(context.Background(), evt)
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "[reaction] decrypt failed error=%q\n", err)
+			return messageReactionUpdate{}, true
+		}
+		reaction = decrypted
+	}
+	if reaction == nil {
+		return messageReactionUpdate{}, false
+	}
+
+	targetID := reaction.GetKey().GetID()
+	senderID := eh.resolveLID(evt.Info.Sender).String()
+	if evt.Info.IsFromMe {
+		senderID = "me"
+	}
+	if targetID == "" || senderID == "" {
+		fmt.Fprintf(os.Stdout, "[reaction] ignored malformed target_present=%t sender_present=%t\n", targetID != "", senderID != "")
+		return messageReactionUpdate{}, true
+	}
+	return messageReactionUpdate{targetID: targetID, senderID: senderID, emoji: reaction.GetText()}, true
 }
 
 func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
@@ -2485,6 +2506,7 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			Pinned:      conv.GetPinned() > 0,
 		})
 
+		var standaloneReactions []messageReactionUpdate
 		for _, histMsg := range conv.GetMessages() {
 			webMsg := histMsg.GetMessage()
 			if webMsg == nil {
@@ -2492,6 +2514,12 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			}
 			parsed, err := eh.sm.client.ParseWebMessage(chatJID, webMsg)
 			if err != nil {
+				continue
+			}
+			if update, isReaction := eh.reactionUpdateFromEvent(parsed); isReaction {
+				if update.targetID != "" && update.senderID != "" {
+					standaloneReactions = append(standaloneReactions, update)
+				}
 				continue
 			}
 			msg, action, ok := eh.normalizeEventMessage(parsed)
@@ -2508,6 +2536,17 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			reactionCount += len(reactions)
 			if eh.sm.db.SetMessageReactions(msg.Id, reactions) {
 				reactionChanges++
+			}
+		}
+		// Apply standalone reactions only after the conversation's ordinary
+		// messages have been inserted. WhatsApp may place a reaction before its
+		// target in the history batch; a single-pass apply would drop it.
+		for _, update := range standaloneReactions {
+			if _, changed := eh.sm.db.ApplyMessageReaction(update.targetID, update.senderID, update.emoji); changed {
+				reactionChanges++
+			}
+			if strings.TrimSpace(update.emoji) != "" {
+				reactionCount++
 			}
 		}
 		if evt.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {

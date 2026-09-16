@@ -7,6 +7,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -83,6 +84,30 @@ func TestHistoryReactionsResolvesAuthors(t *testing.T) {
 	}
 	if reactions[0].SenderId != "15557654321@s.whatsapp.net" || reactions[1].SenderId != "me" {
 		t.Fatalf("expected canonical participant and own identity, got %#v", reactions)
+	}
+}
+
+func TestStandaloneHistoryReactionResolvesTargetAndAuthor(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	eh := &eventHandler{sm: &SessionManager{db: db}}
+	evt := &events.Message{
+		Info: types.MessageInfo{MessageSource: types.MessageSource{
+			Sender:   types.NewADJID("15557654321", 0, 4),
+			IsFromMe: true,
+		}},
+		Message: &waProto.Message{ReactionMessage: &waProto.ReactionMessage{
+			Key:  &waCommon.MessageKey{ID: proto.String("target-message")},
+			Text: proto.String("🙋"),
+		}},
+	}
+
+	update, ok := eh.reactionUpdateFromEvent(evt)
+	if !ok {
+		t.Fatal("standalone reaction must be recognized")
+	}
+	if update.targetID != "target-message" || update.senderID != "me" || update.emoji != "🙋" {
+		t.Fatalf("unexpected normalized reaction: %#v", update)
 	}
 }
 
