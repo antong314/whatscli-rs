@@ -65,6 +65,12 @@ func TestEmbeddedMediaPreview(t *testing.T) {
 				JPEGThumbnail: want,
 			}},
 		},
+		{
+			name: "document",
+			raw: &waProto.Message{DocumentMessage: &waProto.DocumentMessage{
+				JPEGThumbnail: want,
+			}},
+		},
 	}
 
 	for _, test := range tests {

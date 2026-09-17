@@ -3301,6 +3301,8 @@ type MessageProto struct {
 	Reactions                  []*ReactionProto       `protobuf:"bytes,16,rep,name=reactions,proto3" json:"reactions,omitempty"`
 	PollOptions                []*PollOptionProto     `protobuf:"bytes,17,rep,name=poll_options,json=pollOptions,proto3" json:"poll_options,omitempty"`
 	PollSelectableOptionsCount uint32                 `protobuf:"varint,18,opt,name=poll_selectable_options_count,json=pollSelectableOptionsCount,proto3" json:"poll_selectable_options_count,omitempty"`
+	FileSize                   uint64                 `protobuf:"varint,19,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`
+	PageCount                  uint32                 `protobuf:"varint,20,opt,name=page_count,json=pageCount,proto3" json:"page_count,omitempty"`
 	unknownFields              protoimpl.UnknownFields
 	sizeCache                  protoimpl.SizeCache
 }
@@ -3457,6 +3459,20 @@ func (x *MessageProto) GetPollOptions() []*PollOptionProto {
 func (x *MessageProto) GetPollSelectableOptionsCount() uint32 {
 	if x != nil {
 		return x.PollSelectableOptionsCount
+	}
+	return 0
+}
+
+func (x *MessageProto) GetFileSize() uint64 {
+	if x != nil {
+		return x.FileSize
+	}
+	return 0
+}
+
+func (x *MessageProto) GetPageCount() uint32 {
+	if x != nil {
+		return x.PageCount
 	}
 	return 0
 }
@@ -3796,7 +3812,7 @@ const file_whatscli_proto_rawDesc = "" +
 	"\x06unread\x18\x04 \x01(\x05R\x06unread\x12!\n" +
 	"\flast_message\x18\x05 \x01(\x03R\vlastMessage\x12\x1a\n" +
 	"\barchived\x18\x06 \x01(\bR\barchived\x12\x16\n" +
-	"\x06pinned\x18\a \x01(\bR\x06pinned\"\x8a\x05\n" +
+	"\x06pinned\x18\a \x01(\bR\x06pinned\"\xc6\x05\n" +
 	"\fMessageProto\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
 	"\achat_id\x18\x02 \x01(\tR\x06chatId\x12\x1b\n" +
@@ -3817,7 +3833,10 @@ const file_whatscli_proto_rawDesc = "" +
 	"\x06status\x18\x0f \x01(\x0e2\x17.whatscli.MessageStatusR\x06status\x125\n" +
 	"\treactions\x18\x10 \x03(\v2\x17.whatscli.ReactionProtoR\treactions\x12<\n" +
 	"\fpoll_options\x18\x11 \x03(\v2\x19.whatscli.PollOptionProtoR\vpollOptions\x12A\n" +
-	"\x1dpoll_selectable_options_count\x18\x12 \x01(\rR\x1apollSelectableOptionsCount\"B\n" +
+	"\x1dpoll_selectable_options_count\x18\x12 \x01(\rR\x1apollSelectableOptionsCount\x12\x1b\n" +
+	"\tfile_size\x18\x13 \x01(\x04R\bfileSize\x12\x1d\n" +
+	"\n" +
+	"page_count\x18\x14 \x01(\rR\tpageCount\"B\n" +
 	"\rReactionProto\x12\x1b\n" +
 	"\tsender_id\x18\x01 \x01(\tR\bsenderId\x12\x14\n" +
 	"\x05emoji\x18\x02 \x01(\tR\x05emoji\"W\n" +

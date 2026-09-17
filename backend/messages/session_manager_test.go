@@ -69,6 +69,19 @@ func TestMessageScreensEqualIgnoresRawMessagePointer(t *testing.T) {
 	}
 }
 
+func TestLiveMessageHasHistoryGap(t *testing.T) {
+	previous := Message{Id: "before", ChatId: "chat", Timestamp: 1_000}
+	if liveMessageHasHistoryGap(previous, Message{Id: "soon", ChatId: "chat", Timestamp: 1_060}) {
+		t.Fatal("ordinary message spacing must not trigger a history request")
+	}
+	if !liveMessageHasHistoryGap(previous, Message{Id: "after-gap", ChatId: "chat", Timestamp: 1_120}) {
+		t.Fatal("a two-minute quiet gap must request the missing history slice")
+	}
+	if liveMessageHasHistoryGap(previous, Message{Id: "other", ChatId: "other-chat", Timestamp: 2_000}) {
+		t.Fatal("messages from different chats are not comparable")
+	}
+}
+
 func TestHistoryReactionsResolvesAuthors(t *testing.T) {
 	db := &MessageDatabase{}
 	db.Init()
@@ -211,6 +224,27 @@ func TestPollCreationIncludesHistoryVoteTotals(t *testing.T) {
 	msg.PollOptions = pollOptionsFromHistory(poll, updates)
 	if len(msg.PollOptions) != 2 || msg.PollOptions[1].Votes != 2 || !msg.PollOptions[1].Selected {
 		t.Fatalf("unexpected poll totals: %#v", msg.PollOptions)
+	}
+}
+
+func TestDocumentMessageIncludesPreviewMetadata(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	eh := &eventHandler{sm: &SessionManager{db: db}}
+	msg, ok := eh.messageFromInfo(types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: types.NewJID("15551234567", types.DefaultUserServer)},
+		ID:            "document-id",
+	}, &waProto.Message{DocumentMessage: &waProto.DocumentMessage{
+		Mimetype:   proto.String("application/pdf"),
+		FileName:   proto.String("form.pdf"),
+		FileLength: proto.Uint64(851_968),
+		PageCount:  proto.Uint32(5),
+	}})
+	if !ok || msg.Kind != MessageKindDocument {
+		t.Fatalf("document was not normalized: %#v", msg)
+	}
+	if msg.FileSize != 851_968 || msg.PageCount != 5 {
+		t.Fatalf("document metadata was lost: %#v", msg)
 	}
 }
 

@@ -96,6 +96,12 @@ func (md *MessageDatabase) AddMessage(msg Message, markUnread bool) bool {
 			existing.PollOptions = append([]PollOption(nil), msg.PollOptions...)
 			existing.PollSelectableOptionsCount = msg.PollSelectableOptionsCount
 		}
+		if msg.FileSize > 0 {
+			existing.FileSize = msg.FileSize
+		}
+		if msg.PageCount > 0 {
+			existing.PageCount = msg.PageCount
+		}
 		// Only bump the chat counter on a false→true transition: re-delivered
 		// messages (offline sync, cache reload) must not count twice.
 		newlyUnread := markUnread && !existing.Unread
@@ -646,6 +652,19 @@ func (md *MessageDatabase) GetMessages(chatID string) []Message {
 	return out
 }
 
+// GetLatestMessage returns the newest cached message without copying an
+// entire long-running thread. Callers use it as the history-sync anchor and
+// to detect a gap before a newly delivered live message.
+func (md *MessageDatabase) GetLatestMessage(chatID string) (Message, bool) {
+	md.messageLock.RLock()
+	defer md.messageLock.RUnlock()
+	messages := md.messages[chatID]
+	if len(messages) == 0 {
+		return Message{}, false
+	}
+	return messages[len(messages)-1], true
+}
+
 func canonicalMessageJID(id string) string {
 	if id == "" {
 		return ""
@@ -872,6 +891,8 @@ type messageCacheEntry struct {
 	Kind                       string            `json:"kind,omitempty"`
 	MimeType                   string            `json:"mime,omitempty"`
 	FileName                   string            `json:"file,omitempty"`
+	FileSize                   uint64            `json:"file_size,omitempty"`
+	PageCount                  uint32            `json:"page_count,omitempty"`
 	RawProto                   string            `json:"raw,omitempty"`
 	Unread                     bool              `json:"unread,omitempty"`
 	Status                     string            `json:"status,omitempty"`
@@ -899,6 +920,8 @@ func (md *MessageDatabase) SaveMessageCache() {
 			Kind:                       string(msg.Kind),
 			MimeType:                   msg.MimeType,
 			FileName:                   msg.FileName,
+			FileSize:                   msg.FileSize,
+			PageCount:                  msg.PageCount,
 			Unread:                     msg.Unread,
 			Status:                     string(msg.Status),
 			Reactions:                  msg.Reactions,
@@ -946,6 +969,8 @@ func (md *MessageDatabase) LoadMessageCache() {
 			Kind:                       MessageKind(entry.Kind),
 			MimeType:                   entry.MimeType,
 			FileName:                   entry.FileName,
+			FileSize:                   entry.FileSize,
+			PageCount:                  entry.PageCount,
 			Unread:                     entry.Unread,
 			Status:                     MessageStatus(entry.Status),
 			Reactions:                  entry.Reactions,
@@ -957,6 +982,14 @@ func (md *MessageDatabase) LoadMessageCache() {
 				var pb waProto.Message
 				if proto.Unmarshal(raw, &pb) == nil {
 					msg.RawMessage = &pb
+					if document := pb.GetDocumentMessage(); document != nil {
+						if msg.FileSize == 0 {
+							msg.FileSize = document.GetFileLength()
+						}
+						if msg.PageCount == 0 {
+							msg.PageCount = document.GetPageCount()
+						}
+					}
 				}
 			}
 		}

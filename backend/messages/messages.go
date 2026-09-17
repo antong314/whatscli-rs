@@ -146,6 +146,8 @@ type Message struct {
 	Kind                       MessageKind
 	MimeType                   string
 	FileName                   string
+	FileSize                   uint64
+	PageCount                  uint32
 	Unread                     bool
 	Status                     MessageStatus
 	Reactions                  []MessageReaction

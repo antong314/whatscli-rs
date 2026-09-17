@@ -119,6 +119,16 @@ func (s *WhatsCLIServer) GetMedia(req *pb.MediaRequest, stream pb.WhatsCLI_GetMe
 		fmt.Printf("[media-rpc] failed message=%s reason=not_found duration_ms=%d\n", token, time.Since(started).Milliseconds())
 		return status.Errorf(codes.NotFound, "message not found: %s", req.MessageId)
 	}
+	// Document messages carry a small first-page JPEG specifically for chat
+	// previews. Serve it immediately instead of downloading the full PDF just
+	// to draw the bubble; the explicit open/download command still fetches the
+	// original file when the user clicks the card.
+	if msg.Kind == messages.MessageKindDocument {
+		if preview := embeddedMediaPreview(msg); len(preview) > 0 {
+			fmt.Printf("[media-rpc] completed message=%s source=document_preview bytes=%d duration_ms=%d\n", token, len(preview), time.Since(started).Milliseconds())
+			return sendMediaBytes(preview, "image/jpeg", stream)
+		}
+	}
 
 	path, err := s.sm.DownloadImage(msg)
 	if err != nil {

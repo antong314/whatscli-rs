@@ -123,6 +123,12 @@ var ErrNoAvatar = errors.New("chat has no profile picture")
 // than typical "scrolling past" but shorter than "I'm reading the messages".
 const DefaultMarkReadDelay = 3 * time.Second
 
+// A live message arriving well after the newest cached message often means
+// this linked device was asleep while another device sent one or more
+// messages. Ask the phone for the slice immediately before the live message
+// so the quiet-period gap is filled instead of silently skipping messages.
+const liveHistoryGapThreshold = 2 * time.Minute
+
 // StoreTranslation saves a translation for a message ID (thread-safe, persistent).
 func (sm *SessionManager) StoreTranslation(messageID, text string) {
 	sm.db.StoreTranslation(messageID, text)
@@ -299,7 +305,7 @@ func (sm *SessionManager) refreshSelectedChatHistory(chatID string) {
 	go func() {
 		started := time.Now()
 		latestErr := sm.requestLatestMessageRefresh(chatID)
-		historyErr := sm.requestChatHistorySync(chatID)
+		historyErr := sm.requestSelectedChatHistorySync(chatID)
 		if latestErr != nil || historyErr != nil {
 			fmt.Fprintf(os.Stdout, "[history-refresh] request failed latest_error=%v history_error=%v duration_ms=%d\n", latestErr, historyErr, time.Since(started).Milliseconds())
 			return
@@ -763,33 +769,55 @@ func (sm *SessionManager) reconcileUnreadWithPhone() {
 // handleHistorySync, which applies the phone's own unreadCount — the only
 // authoritative source of a chat's read state.
 func (sm *SessionManager) requestChatHistorySync(chatID string) error {
+	last, ok := sm.db.GetLatestMessage(chatID)
+	if !ok {
+		return errors.New("no anchor message for " + chatID)
+	}
+	return sm.requestHistoryBeforeMessage(chatID, last.Id, last.FromMe, last.Timestamp, 50, false)
+}
+
+// requestSelectedChatHistorySync tries both identities for a migrated 1:1
+// chat. Different primary-device versions have indexed on-demand history by
+// either the newer LID or the original phone-number JID. Sending both is
+// reserved for the open chat (and live gap repair) so the startup unread
+// reconciliation does not double its request volume.
+func (sm *SessionManager) requestSelectedChatHistorySync(chatID string) error {
+	last, ok := sm.db.GetLatestMessage(chatID)
+	if !ok {
+		return errors.New("no anchor message for " + chatID)
+	}
+	return sm.requestHistoryBeforeMessage(chatID, last.Id, last.FromMe, last.Timestamp, 50, true)
+}
+
+func (sm *SessionManager) requestHistoryBeforeMessage(chatID, messageID string, fromMe bool, timestamp uint64, count int, includePNFallback bool) error {
 	if sm.client == nil || !sm.client.IsConnected() {
 		return errors.New("not connected")
 	}
-	jid, err := types.ParseJID(chatID)
+	originalJID, err := types.ParseJID(chatID)
 	if err != nil {
 		return err
 	}
-	// The phone indexes migrated 1:1 chats by LID; a request addressed by
-	// phone-number JID gets silently ignored for those, so translate first.
-	if jid.Server == types.DefaultUserServer && sm.client.Store != nil && sm.client.Store.LIDs != nil {
-		if lid, lidErr := sm.client.Store.LIDs.GetLIDForPN(context.Background(), jid); lidErr == nil && !lid.IsEmpty() {
-			jid = lid
+	requestJID := originalJID
+	if requestJID.Server == types.DefaultUserServer && sm.client.Store != nil && sm.client.Store.LIDs != nil {
+		if lid, lidErr := sm.client.Store.LIDs.GetLIDForPN(context.Background(), requestJID); lidErr == nil && !lid.IsEmpty() {
+			requestJID = lid
 		}
 	}
-	msgs := sm.db.GetMessages(chatID)
-	if len(msgs) == 0 {
-		return errors.New("no anchor message for " + chatID)
+	send := func(jid types.JID) error {
+		info := &types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: jid, IsFromMe: fromMe},
+			ID:            messageID,
+			Timestamp:     time.Unix(int64(timestamp), 0),
+		}
+		req := sm.client.BuildHistorySyncRequest(info, count)
+		_, sendErr := sm.client.SendPeerMessage(context.Background(), req)
+		return sendErr
 	}
-	last := msgs[len(msgs)-1]
-	info := &types.MessageInfo{
-		MessageSource: types.MessageSource{Chat: jid, IsFromMe: last.FromMe},
-		ID:            last.Id,
-		Timestamp:     time.Unix(int64(last.Timestamp), 0),
+	primaryErr := send(requestJID)
+	if !includePNFallback || requestJID == originalJID {
+		return primaryErr
 	}
-	req := sm.client.BuildHistorySyncRequest(info, 50)
-	_, err = sm.client.SendPeerMessage(context.Background(), req)
-	return err
+	return errors.Join(primaryErr, send(originalJID))
 }
 
 func (sm *SessionManager) loadContacts() {
@@ -2132,7 +2160,7 @@ func (sm *SessionManager) outgoingMessageFromSendResponse(resp whatsmeow.SendRes
 		contactID = selfID
 	}
 
-	return Message{
+	msg := Message{
 		Id:           string(resp.ID),
 		ChatId:       chatID,
 		SenderId:     selfID,
@@ -2150,6 +2178,11 @@ func (sm *SessionManager) outgoingMessageFromSendResponse(resp whatsmeow.SendRes
 		Status:     MessageStatusSent,
 		RawMessage: raw,
 	}
+	if document := raw.GetDocumentMessage(); document != nil {
+		msg.FileSize = document.GetFileLength()
+		msg.PageCount = document.GetPageCount()
+	}
+	return msg
 }
 
 func notify(title, message string) error {
@@ -2367,6 +2400,8 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 	// A message landing in the open chat is normally read on the spot — but
 	// if the user only just arrowed onto the chat (dwell timer still armed),
 	// flag it unread so the timer's batch decides, same as the rest.
+	previousLatest, hadPrevious := eh.sm.db.GetLatestMessage(msg.ChatId)
+	hasHistoryGap := hadPrevious && liveMessageHasHistoryGap(previousLatest, msg)
 	inDwell := eh.sm.hasPendingMarkRead(msg.ChatId)
 	markUnread := !msg.FromMe && (msg.ChatId != eh.sm.currentReceiver || inDwell)
 	isNew := eh.sm.db.AddMessage(msg, markUnread)
@@ -2382,6 +2417,22 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 	// arriving after the reply still counts as unread.
 	if msg.FromMe {
 		eh.sm.db.MarkChatReadUpTo(msg.ChatId, int64(msg.Timestamp))
+	}
+	if isNew && hasHistoryGap {
+		gapSeconds := msg.Timestamp - previousLatest.Timestamp
+		chatOpen := eh.sm.currentReceiver == msg.ChatId
+		go func(anchor Message, gapSeconds uint64, chatOpen bool) {
+			started := time.Now()
+			err := eh.sm.requestHistoryBeforeMessage(anchor.ChatId, anchor.Id, anchor.FromMe, anchor.Timestamp, 50, true)
+			fmt.Fprintf(
+				os.Stdout,
+				"[history-gap] requested chat_open=%t gap_seconds=%d error=%v duration_ms=%d\n",
+				chatOpen,
+				gapSeconds,
+				err,
+				time.Since(started).Milliseconds(),
+			)
+		}(msg, gapSeconds, chatOpen)
 	}
 	// Read receipt for an arrival in the settled current chat — this is
 	// what clears the PHONE's badge (and gives the sender blue ticks); the
@@ -2412,6 +2463,13 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 			eh.sm.db.SaveTranslationCache()
 		}()
 	}
+}
+
+func liveMessageHasHistoryGap(previous, incoming Message) bool {
+	if previous.ChatId == "" || previous.ChatId != incoming.ChatId || incoming.Timestamp <= previous.Timestamp {
+		return false
+	}
+	return time.Duration(incoming.Timestamp-previous.Timestamp)*time.Second >= liveHistoryGapThreshold
 }
 
 // handleLiveReaction consumes reaction protocol messages before ordinary
@@ -2810,8 +2868,23 @@ func messageScreensEqual(a, b []Message) bool {
 			x.ContactShort != y.ContactShort || x.Timestamp != y.Timestamp ||
 			x.FromMe != y.FromMe || x.Forwarded != y.Forwarded || x.Text != y.Text ||
 			x.Kind != y.Kind || x.MimeType != y.MimeType || x.FileName != y.FileName ||
+			x.FileSize != y.FileSize || x.PageCount != y.PageCount ||
 			x.Unread != y.Unread || x.Status != y.Status ||
-			!messageReactionsEqual(x.Reactions, y.Reactions) {
+			x.PollSelectableOptionsCount != y.PollSelectableOptionsCount ||
+			!messageReactionsEqual(x.Reactions, y.Reactions) ||
+			!pollOptionsEqual(x.PollOptions, y.PollOptions) {
+			return false
+		}
+	}
+	return true
+}
+
+func pollOptionsEqual(a, b []PollOption) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}
@@ -2935,6 +3008,8 @@ func (eh *eventHandler) messageFromInfo(info types.MessageInfo, raw *waProto.Mes
 		msg.Kind = MessageKindDocument
 		msg.MimeType = doc.GetMimetype()
 		msg.FileName = doc.GetFileName()
+		msg.FileSize = doc.GetFileLength()
+		msg.PageCount = doc.GetPageCount()
 		msg.Text = mediaDisplayText(MessageKindDocument, doc.GetFileName(), doc.GetCaption())
 		msg.Forwarded = doc.GetContextInfo().GetIsForwarded()
 		return msg, true
@@ -3162,7 +3237,9 @@ func (sm *SessionManager) downloadMessage(msg Message, preview bool) (string, er
 		return fullPath, nil
 	}
 
-	data, err := sm.client.Download(context.Background(), downloadable)
+	downloadCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	data, err := sm.client.Download(downloadCtx, downloadable)
 	if err != nil {
 		return "", err
 	}

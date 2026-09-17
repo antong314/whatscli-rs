@@ -343,6 +343,8 @@ func messageToProto(m messages.Message) *pb.MessageProto {
 		Reactions:                  reactions,
 		PollOptions:                pollOptions,
 		PollSelectableOptionsCount: m.PollSelectableOptionsCount,
+		FileSize:                   m.FileSize,
+		PageCount:                  m.PageCount,
 	}
 }
 
