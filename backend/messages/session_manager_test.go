@@ -82,6 +82,34 @@ func TestLiveMessageHasHistoryGap(t *testing.T) {
 	}
 }
 
+func TestRecoveredGapMessagesContributeToUnreadBadge(t *testing.T) {
+	gap := unreadHistoryGap{after: 1_000, through: 1_300}
+	if !shouldMarkHistoryMessageUnread(Message{ChatId: "chat", Timestamp: 1_200}, gap, false) {
+		t.Fatal("an incoming message recovered inside an unread gap must be unread")
+	}
+	if shouldMarkHistoryMessageUnread(Message{ChatId: "chat", Timestamp: 1_200, FromMe: true}, gap, false) {
+		t.Fatal("our own recovered messages must not increment unread")
+	}
+	if shouldMarkHistoryMessageUnread(Message{ChatId: "chat", Timestamp: 1_200}, gap, true) {
+		t.Fatal("messages recovered while the chat is open are already read")
+	}
+	if shouldMarkHistoryMessageUnread(Message{ChatId: "chat", Timestamp: 900}, gap, false) {
+		t.Fatal("older history outside the missed range must remain read")
+	}
+}
+
+func TestOnDemandZeroDoesNotClearUnreadBadge(t *testing.T) {
+	if _, usable := usableOnDemandUnreadCount(0, false); usable {
+		t.Fatal("on-demand history reports a meaningless zero that must not clear local unread state")
+	}
+	if count, usable := usableOnDemandUnreadCount(10, false); !usable || count != 10 {
+		t.Fatalf("positive phone count should be applied, got count=%d usable=%t", count, usable)
+	}
+	if count, usable := usableOnDemandUnreadCount(0, true); !usable || count != 1 {
+		t.Fatalf("manual mark-unread should map to one, got count=%d usable=%t", count, usable)
+	}
+}
+
 func TestHistoryReactionsResolvesAuthors(t *testing.T) {
 	db := &MessageDatabase{}
 	db.Init()

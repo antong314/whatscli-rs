@@ -95,6 +95,13 @@ type SessionManager struct {
 	historyRefreshMu sync.Mutex
 	historyRefreshAt map[string]time.Time
 
+	// pendingUnreadGaps remembers the range behind a newly delivered unread
+	// message while its on-demand history request is in flight. Messages the
+	// phone returns inside that range were also missed while this device was
+	// offline and must contribute to the unread badge.
+	pendingUnreadGapMu sync.Mutex
+	pendingUnreadGaps  map[string]unreadHistoryGap
+
 	// pendingReactionMu guards reactions that arrive before their target
 	// message is available. WhatsApp may replay offline reactions immediately
 	// after Connect, while loadRecentChats is still restoring the disk cache.
@@ -112,6 +119,12 @@ type avatarEntry struct {
 	data []byte
 	mime string
 	err  error
+}
+
+type unreadHistoryGap struct {
+	after     uint64
+	through   uint64
+	expiresAt time.Time
 }
 
 // ErrNoAvatar marks chats without a (visible) profile picture so the gRPC
@@ -178,6 +191,7 @@ func (sm *SessionManager) Init(handler UiMessageHandler) {
 	sm.markReadDelay = DefaultMarkReadDelay
 	sm.markReadFn = sm.autoMarkRead
 	sm.historyRefreshAt = make(map[string]time.Time)
+	sm.pendingUnreadGaps = make(map[string]unreadHistoryGap)
 	sm.pendingReactions = make(map[string]map[string]messageReactionUpdate)
 }
 
@@ -2421,6 +2435,9 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 	if isNew && hasHistoryGap {
 		gapSeconds := msg.Timestamp - previousLatest.Timestamp
 		chatOpen := eh.sm.currentReceiver == msg.ChatId
+		if markUnread {
+			eh.sm.rememberUnreadHistoryGap(msg.ChatId, previousLatest.Timestamp, msg.Timestamp)
+		}
 		go func(anchor Message, gapSeconds uint64, chatOpen bool) {
 			started := time.Now()
 			err := eh.sm.requestHistoryBeforeMessage(anchor.ChatId, anchor.Id, anchor.FromMe, anchor.Timestamp, 50, true)
@@ -2470,6 +2487,51 @@ func liveMessageHasHistoryGap(previous, incoming Message) bool {
 		return false
 	}
 	return time.Duration(incoming.Timestamp-previous.Timestamp)*time.Second >= liveHistoryGapThreshold
+}
+
+func (sm *SessionManager) rememberUnreadHistoryGap(chatID string, after, through uint64) {
+	if chatID == "" || after >= through {
+		return
+	}
+	sm.pendingUnreadGapMu.Lock()
+	defer sm.pendingUnreadGapMu.Unlock()
+	if sm.pendingUnreadGaps == nil {
+		sm.pendingUnreadGaps = make(map[string]unreadHistoryGap)
+	}
+	gap, ok := sm.pendingUnreadGaps[chatID]
+	if !ok || time.Now().After(gap.expiresAt) {
+		gap = unreadHistoryGap{after: after, through: through}
+	} else {
+		gap.after = min(gap.after, after)
+		gap.through = max(gap.through, through)
+	}
+	gap.expiresAt = time.Now().Add(2 * time.Minute)
+	sm.pendingUnreadGaps[chatID] = gap
+}
+
+func (sm *SessionManager) pendingUnreadHistoryGap(chatID string) (unreadHistoryGap, bool) {
+	sm.pendingUnreadGapMu.Lock()
+	defer sm.pendingUnreadGapMu.Unlock()
+	gap, ok := sm.pendingUnreadGaps[chatID]
+	if ok && time.Now().After(gap.expiresAt) {
+		delete(sm.pendingUnreadGaps, chatID)
+		return unreadHistoryGap{}, false
+	}
+	return gap, ok
+}
+
+func shouldMarkHistoryMessageUnread(msg Message, gap unreadHistoryGap, chatOpen bool) bool {
+	return !chatOpen && !msg.FromMe && msg.Timestamp > gap.after && msg.Timestamp <= gap.through
+}
+
+func usableOnDemandUnreadCount(unread int, markedUnread bool) (int, bool) {
+	if unread > 0 {
+		return unread, true
+	}
+	if markedUnread {
+		return 1, true
+	}
+	return 0, false
 }
 
 // handleLiveReaction consumes reaction protocol messages before ordinary
@@ -2691,9 +2753,11 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 		// duplicate entry.
 		chatJID = eh.resolveLID(chatJID)
 		chatID = chatJID.String()
-		if chatID == currentReceiver {
+		chatOpen := chatID == currentReceiver
+		if chatOpen {
 			currentConversationIncluded = true
 		}
+		unreadGap, hasUnreadGap := eh.sm.pendingUnreadHistoryGap(chatID)
 
 		chatName := conv.GetName()
 		if chatName == "" {
@@ -2747,7 +2811,8 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			if msg.FromMe {
 				msg.Status = statusFromWebInfo(webMsg.GetStatus())
 			}
-			if eh.sm.db.AddMessage(msg, false) {
+			markUnread := hasUnreadGap && shouldMarkHistoryMessageUnread(msg, unreadGap, chatOpen)
+			if eh.sm.db.AddMessage(msg, markUnread) {
 				addedMessages++
 			}
 			reactions := eh.historyReactions(webMsg.GetReactions(), chatJID)
@@ -2771,19 +2836,13 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			}
 		}
 		if evt.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
-			// This conversation came from an explicit per-chat request to the
-			// primary phone, so its state is authoritative — including zero.
-			// Ignoring zero made the local counter a one-way ratchet: a chat
-			// read on the phone while this client was offline stayed unread
-			// forever unless a read receipt happened to be replayed later.
-			n := int(conv.GetUnreadCount())
-			if conv.GetMarkedAsUnread() && n == 0 {
-				// WhatsApp represents a manual "mark unread" separately from
-				// unread message count. The current client model uses one badge
-				// for both states, so preserve that marker as a count of one.
-				n = 1
+			// WhatsApp currently reports unread=0 for on-demand history even
+			// when its own desktop client shows a non-zero badge. A positive
+			// count is still useful, but zero must not erase live/offline unread
+			// state; read-self receipts and app-state events perform that clear.
+			if n, usable := usableOnDemandUnreadCount(int(conv.GetUnreadCount()), conv.GetMarkedAsUnread()); usable {
+				eh.sm.db.UpdateChatUnread(chatID, n)
 			}
-			eh.sm.db.UpdateChatUnread(chatID, n)
 		} else {
 			// Pairing-time history sync: authoritative snapshot, apply exactly.
 			eh.sm.db.UpdateChatUnread(chatID, int(conv.GetUnreadCount()))
