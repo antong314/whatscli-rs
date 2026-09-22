@@ -69,35 +69,6 @@ func TestMessageScreensEqualIgnoresRawMessagePointer(t *testing.T) {
 	}
 }
 
-func TestLiveMessageHasHistoryGap(t *testing.T) {
-	previous := Message{Id: "before", ChatId: "chat", Timestamp: 1_000}
-	if liveMessageHasHistoryGap(previous, Message{Id: "soon", ChatId: "chat", Timestamp: 1_060}) {
-		t.Fatal("ordinary message spacing must not trigger a history request")
-	}
-	if !liveMessageHasHistoryGap(previous, Message{Id: "after-gap", ChatId: "chat", Timestamp: 1_120}) {
-		t.Fatal("a two-minute quiet gap must request the missing history slice")
-	}
-	if liveMessageHasHistoryGap(previous, Message{Id: "other", ChatId: "other-chat", Timestamp: 2_000}) {
-		t.Fatal("messages from different chats are not comparable")
-	}
-}
-
-func TestRecoveredGapMessagesContributeToUnreadBadge(t *testing.T) {
-	gap := unreadHistoryGap{after: 1_000, through: 1_300}
-	if !shouldMarkHistoryMessageUnread(Message{ChatId: "chat", Timestamp: 1_200}, gap, false) {
-		t.Fatal("an incoming message recovered inside an unread gap must be unread")
-	}
-	if shouldMarkHistoryMessageUnread(Message{ChatId: "chat", Timestamp: 1_200, FromMe: true}, gap, false) {
-		t.Fatal("our own recovered messages must not increment unread")
-	}
-	if shouldMarkHistoryMessageUnread(Message{ChatId: "chat", Timestamp: 1_200}, gap, true) {
-		t.Fatal("messages recovered while the chat is open are already read")
-	}
-	if shouldMarkHistoryMessageUnread(Message{ChatId: "chat", Timestamp: 900}, gap, false) {
-		t.Fatal("older history outside the missed range must remain read")
-	}
-}
-
 func TestOnDemandZeroDoesNotClearUnreadBadge(t *testing.T) {
 	if _, usable := usableOnDemandUnreadCount(0, false); usable {
 		t.Fatal("on-demand history reports a meaningless zero that must not clear local unread state")

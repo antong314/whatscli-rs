@@ -89,19 +89,6 @@ type SessionManager struct {
 	chatRefreshTimer       *time.Timer
 	chatRefreshPushPending bool
 
-	// historyRefreshAt throttles lightweight per-selection history refreshes.
-	// Cached messages render immediately; the phone response supplies mutable
-	// metadata such as reactions that the older disk cache may not contain.
-	historyRefreshMu sync.Mutex
-	historyRefreshAt map[string]time.Time
-
-	// pendingUnreadGaps remembers the range behind a newly delivered unread
-	// message while its on-demand history request is in flight. Messages the
-	// phone returns inside that range were also missed while this device was
-	// offline and must contribute to the unread badge.
-	pendingUnreadGapMu sync.Mutex
-	pendingUnreadGaps  map[string]unreadHistoryGap
-
 	// pendingReactionMu guards reactions that arrive before their target
 	// message is available. WhatsApp may replay offline reactions immediately
 	// after Connect, while loadRecentChats is still restoring the disk cache.
@@ -121,12 +108,6 @@ type avatarEntry struct {
 	err  error
 }
 
-type unreadHistoryGap struct {
-	after     uint64
-	through   uint64
-	expiresAt time.Time
-}
-
 // ErrNoAvatar marks chats without a (visible) profile picture so the gRPC
 // layer can map them to NOT_FOUND instead of a hard error.
 var ErrNoAvatar = errors.New("chat has no profile picture")
@@ -135,12 +116,6 @@ var ErrNoAvatar = errors.New("chat has no profile picture")
 // (e.g. via Up/Down arrow) before marking it as read. Picked to be longer
 // than typical "scrolling past" but shorter than "I'm reading the messages".
 const DefaultMarkReadDelay = 3 * time.Second
-
-// A live message arriving well after the newest cached message often means
-// this linked device was asleep while another device sent one or more
-// messages. Ask the phone for the slice immediately before the live message
-// so the quiet-period gap is filled instead of silently skipping messages.
-const liveHistoryGapThreshold = 2 * time.Minute
 
 // StoreTranslation saves a translation for a message ID (thread-safe, persistent).
 func (sm *SessionManager) StoreTranslation(messageID, text string) {
@@ -190,8 +165,6 @@ func (sm *SessionManager) Init(handler UiMessageHandler) {
 	sm.eventHandler = &eventHandler{sm: sm}
 	sm.markReadDelay = DefaultMarkReadDelay
 	sm.markReadFn = sm.autoMarkRead
-	sm.historyRefreshAt = make(map[string]time.Time)
-	sm.pendingUnreadGaps = make(map[string]unreadHistoryGap)
 	sm.pendingReactions = make(map[string]map[string]messageReactionUpdate)
 }
 
@@ -286,7 +259,6 @@ func (sm *SessionManager) setCurrentReceiver(id string, intent SelectIntent) {
 	sm.currentReceiver = id
 	msgs := sm.getMessages(id)
 	sm.uiHandler.NewScreen(msgs)
-	sm.refreshSelectedChatHistory(id)
 	limit := sm.uiHandler.GetViewportLines()
 	if limit < 50 {
 		limit = 50
@@ -299,67 +271,6 @@ func (sm *SessionManager) setCurrentReceiver(id string, intent SelectIntent) {
 	sm.transcribeScreenMessages(tail)
 
 	sm.scheduleAutoMarkRead(id, intent)
-}
-
-// refreshSelectedChatHistory asks the phone for a recent authoritative slice
-// without delaying the cached screen. Reactions are mutable message metadata,
-// so a local message cache alone cannot be the final authority. The throttle
-// prevents rapid sidebar navigation from flooding the linked-device channel.
-func (sm *SessionManager) refreshSelectedChatHistory(chatID string) {
-	now := time.Now()
-	sm.historyRefreshMu.Lock()
-	last := sm.historyRefreshAt[chatID]
-	if !last.IsZero() && now.Sub(last) < 30*time.Second {
-		sm.historyRefreshMu.Unlock()
-		return
-	}
-	sm.historyRefreshAt[chatID] = now
-	sm.historyRefreshMu.Unlock()
-
-	go func() {
-		started := time.Now()
-		latestErr := sm.requestLatestMessageRefresh(chatID)
-		historyErr := sm.requestSelectedChatHistorySync(chatID)
-		if latestErr != nil || historyErr != nil {
-			fmt.Fprintf(os.Stdout, "[history-refresh] request failed latest_error=%v history_error=%v duration_ms=%d\n", latestErr, historyErr, time.Since(started).Milliseconds())
-			return
-		}
-		fmt.Fprintf(os.Stdout, "[history-refresh] request sent duration_ms=%d\n", time.Since(started).Milliseconds())
-	}()
-}
-
-// requestLatestMessageRefresh complements BuildHistorySyncRequest, whose
-// response deliberately contains only messages before its anchor. Asking the
-// primary device to resend the anchor provides mutable metadata (especially
-// reactions) for the newest message in a chat too.
-func (sm *SessionManager) requestLatestMessageRefresh(chatID string) error {
-	if sm.client == nil || !sm.client.IsConnected() {
-		return errors.New("not connected")
-	}
-	chatJID, err := types.ParseJID(chatID)
-	if err != nil {
-		return err
-	}
-	if chatJID.Server == types.DefaultUserServer && sm.client.Store != nil && sm.client.Store.LIDs != nil {
-		if lid, lidErr := sm.client.Store.LIDs.GetLIDForPN(context.Background(), chatJID); lidErr == nil && !lid.IsEmpty() {
-			chatJID = lid
-		}
-	}
-	msgs := sm.db.GetMessages(chatID)
-	if len(msgs) == 0 {
-		return errors.New("no anchor message for " + chatID)
-	}
-	last := msgs[len(msgs)-1]
-	sender := types.EmptyJID
-	if !last.FromMe {
-		sender, err = types.ParseJID(last.SenderId)
-		if err != nil {
-			return err
-		}
-	}
-	req := sm.client.BuildUnavailableMessageRequest(chatJID, sender, last.Id)
-	_, err = sm.client.SendPeerMessage(context.Background(), req)
-	return err
 }
 
 // scheduleAutoMarkRead arranges for `chatID` to be marked as read.
@@ -678,11 +589,6 @@ func (sm *SessionManager) loadRecentChats() {
 	trace("app state synced")
 	sm.uiHandler.SetChats(sm.db.GetChatIds())
 
-	// Converge unread badges with the phone in the background; receipts
-	// missed while we were offline are gone forever, so ask the phone
-	// directly for its current per-chat state.
-	go sm.reconcileUnreadWithPhone()
-
 	// Diagnostic hook: WHATSCLI_UNREAD_PROBE=<jid>[,<jid>…] requests an
 	// on-demand history sync for those chats after connect, to test whether
 	// the phone reports unreadCount in the responses.
@@ -752,58 +658,19 @@ func (sm *SessionManager) syncAppState() {
 	}
 }
 
-// reconcileUnreadWithPhone asks the phone for the authoritative unread state
-// of the most recently active chats, once per launch. Read receipts only
-// reach us while we're running (WhatsApp's offline replay is bounded and
-// lossy for busy groups), so after downtime our local unread flags drift
-// from the phone. On-demand history sync responses carry the phone's own
-// unreadCount per conversation; handleHistorySync applies them. Runs in a
-// goroutine: one peer message per chat, spaced out to be polite.
-func (sm *SessionManager) reconcileUnreadWithPhone() {
-	const maxChats = 30
-	started := time.Now()
-	fmt.Fprintf(os.Stdout, "[unread-sync] started max_chats=%d\n", maxChats)
-	requested := 0
-	for _, chat := range sm.db.GetChatIds() {
-		if requested >= maxChats {
-			break
-		}
-		if err := sm.requestChatHistorySync(chat.Id); err != nil {
-			continue // no anchor message or transient send failure — skip
-		}
-		requested++
-		time.Sleep(300 * time.Millisecond)
-	}
-	fmt.Fprintf(os.Stdout, "[unread-sync] requests completed sent=%d duration_ms=%d\n", requested, time.Since(started).Milliseconds())
-}
-
-// requestChatHistorySync asks the primary phone for the most recent history
-// of one chat via an on-demand history sync peer message. The response
-// arrives as an events.HistorySync (type ON_DEMAND) and flows through
-// handleHistorySync, which applies the phone's own unreadCount — the only
-// authoritative source of a chat's read state.
+// requestChatHistorySync is intentionally diagnostic-only. Normal operation
+// relies on WhatsApp's linked-device live/offline delivery and never wakes the
+// phone for an on-demand history slice. This helper remains available behind
+// WHATSCLI_UNREAD_PROBE for troubleshooting.
 func (sm *SessionManager) requestChatHistorySync(chatID string) error {
 	last, ok := sm.db.GetLatestMessage(chatID)
 	if !ok {
 		return errors.New("no anchor message for " + chatID)
 	}
-	return sm.requestHistoryBeforeMessage(chatID, last.Id, last.FromMe, last.Timestamp, 50, false)
+	return sm.requestHistoryBeforeMessage(chatID, last.Id, last.FromMe, last.Timestamp, 50)
 }
 
-// requestSelectedChatHistorySync tries both identities for a migrated 1:1
-// chat. Different primary-device versions have indexed on-demand history by
-// either the newer LID or the original phone-number JID. Sending both is
-// reserved for the open chat (and live gap repair) so the startup unread
-// reconciliation does not double its request volume.
-func (sm *SessionManager) requestSelectedChatHistorySync(chatID string) error {
-	last, ok := sm.db.GetLatestMessage(chatID)
-	if !ok {
-		return errors.New("no anchor message for " + chatID)
-	}
-	return sm.requestHistoryBeforeMessage(chatID, last.Id, last.FromMe, last.Timestamp, 50, true)
-}
-
-func (sm *SessionManager) requestHistoryBeforeMessage(chatID, messageID string, fromMe bool, timestamp uint64, count int, includePNFallback bool) error {
+func (sm *SessionManager) requestHistoryBeforeMessage(chatID, messageID string, fromMe bool, timestamp uint64, count int) error {
 	if sm.client == nil || !sm.client.IsConnected() {
 		return errors.New("not connected")
 	}
@@ -827,11 +694,7 @@ func (sm *SessionManager) requestHistoryBeforeMessage(chatID, messageID string, 
 		_, sendErr := sm.client.SendPeerMessage(context.Background(), req)
 		return sendErr
 	}
-	primaryErr := send(requestJID)
-	if !includePNFallback || requestJID == originalJID {
-		return primaryErr
-	}
-	return errors.Join(primaryErr, send(originalJID))
+	return send(requestJID)
 }
 
 func (sm *SessionManager) loadContacts() {
@@ -2414,8 +2277,6 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 	// A message landing in the open chat is normally read on the spot — but
 	// if the user only just arrowed onto the chat (dwell timer still armed),
 	// flag it unread so the timer's batch decides, same as the rest.
-	previousLatest, hadPrevious := eh.sm.db.GetLatestMessage(msg.ChatId)
-	hasHistoryGap := hadPrevious && liveMessageHasHistoryGap(previousLatest, msg)
 	inDwell := eh.sm.hasPendingMarkRead(msg.ChatId)
 	markUnread := !msg.FromMe && (msg.ChatId != eh.sm.currentReceiver || inDwell)
 	isNew := eh.sm.db.AddMessage(msg, markUnread)
@@ -2431,25 +2292,6 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 	// arriving after the reply still counts as unread.
 	if msg.FromMe {
 		eh.sm.db.MarkChatReadUpTo(msg.ChatId, int64(msg.Timestamp))
-	}
-	if isNew && hasHistoryGap {
-		gapSeconds := msg.Timestamp - previousLatest.Timestamp
-		chatOpen := eh.sm.currentReceiver == msg.ChatId
-		if markUnread {
-			eh.sm.rememberUnreadHistoryGap(msg.ChatId, previousLatest.Timestamp, msg.Timestamp)
-		}
-		go func(anchor Message, gapSeconds uint64, chatOpen bool) {
-			started := time.Now()
-			err := eh.sm.requestHistoryBeforeMessage(anchor.ChatId, anchor.Id, anchor.FromMe, anchor.Timestamp, 50, true)
-			fmt.Fprintf(
-				os.Stdout,
-				"[history-gap] requested chat_open=%t gap_seconds=%d error=%v duration_ms=%d\n",
-				chatOpen,
-				gapSeconds,
-				err,
-				time.Since(started).Milliseconds(),
-			)
-		}(msg, gapSeconds, chatOpen)
 	}
 	// Read receipt for an arrival in the settled current chat — this is
 	// what clears the PHONE's badge (and gives the sender blue ticks); the
@@ -2480,48 +2322,6 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 			eh.sm.db.SaveTranslationCache()
 		}()
 	}
-}
-
-func liveMessageHasHistoryGap(previous, incoming Message) bool {
-	if previous.ChatId == "" || previous.ChatId != incoming.ChatId || incoming.Timestamp <= previous.Timestamp {
-		return false
-	}
-	return time.Duration(incoming.Timestamp-previous.Timestamp)*time.Second >= liveHistoryGapThreshold
-}
-
-func (sm *SessionManager) rememberUnreadHistoryGap(chatID string, after, through uint64) {
-	if chatID == "" || after >= through {
-		return
-	}
-	sm.pendingUnreadGapMu.Lock()
-	defer sm.pendingUnreadGapMu.Unlock()
-	if sm.pendingUnreadGaps == nil {
-		sm.pendingUnreadGaps = make(map[string]unreadHistoryGap)
-	}
-	gap, ok := sm.pendingUnreadGaps[chatID]
-	if !ok || time.Now().After(gap.expiresAt) {
-		gap = unreadHistoryGap{after: after, through: through}
-	} else {
-		gap.after = min(gap.after, after)
-		gap.through = max(gap.through, through)
-	}
-	gap.expiresAt = time.Now().Add(2 * time.Minute)
-	sm.pendingUnreadGaps[chatID] = gap
-}
-
-func (sm *SessionManager) pendingUnreadHistoryGap(chatID string) (unreadHistoryGap, bool) {
-	sm.pendingUnreadGapMu.Lock()
-	defer sm.pendingUnreadGapMu.Unlock()
-	gap, ok := sm.pendingUnreadGaps[chatID]
-	if ok && time.Now().After(gap.expiresAt) {
-		delete(sm.pendingUnreadGaps, chatID)
-		return unreadHistoryGap{}, false
-	}
-	return gap, ok
-}
-
-func shouldMarkHistoryMessageUnread(msg Message, gap unreadHistoryGap, chatOpen bool) bool {
-	return !chatOpen && !msg.FromMe && msg.Timestamp > gap.after && msg.Timestamp <= gap.through
 }
 
 func usableOnDemandUnreadCount(unread int, markedUnread bool) (int, bool) {
@@ -2753,11 +2553,9 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 		// duplicate entry.
 		chatJID = eh.resolveLID(chatJID)
 		chatID = chatJID.String()
-		chatOpen := chatID == currentReceiver
-		if chatOpen {
+		if chatID == currentReceiver {
 			currentConversationIncluded = true
 		}
-		unreadGap, hasUnreadGap := eh.sm.pendingUnreadHistoryGap(chatID)
 
 		chatName := conv.GetName()
 		if chatName == "" {
@@ -2811,8 +2609,7 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			if msg.FromMe {
 				msg.Status = statusFromWebInfo(webMsg.GetStatus())
 			}
-			markUnread := hasUnreadGap && shouldMarkHistoryMessageUnread(msg, unreadGap, chatOpen)
-			if eh.sm.db.AddMessage(msg, markUnread) {
+			if eh.sm.db.AddMessage(msg, false) {
 				addedMessages++
 			}
 			reactions := eh.historyReactions(webMsg.GetReactions(), chatJID)
