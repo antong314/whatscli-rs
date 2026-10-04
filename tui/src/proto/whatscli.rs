@@ -532,6 +532,14 @@ pub struct MessageProto {
     pub status: i32,
     #[prost(message, repeated, tag = "16")]
     pub reactions: ::prost::alloc::vec::Vec<ReactionProto>,
+    #[prost(message, repeated, tag = "17")]
+    pub poll_options: ::prost::alloc::vec::Vec<PollOptionProto>,
+    #[prost(uint32, tag = "18")]
+    pub poll_selectable_options_count: u32,
+    #[prost(uint64, tag = "19")]
+    pub file_size: u64,
+    #[prost(uint32, tag = "20")]
+    pub page_count: u32,
 }
 /// One participant's current reaction to a message. WhatsApp permits at most
 /// one reaction per participant; sending an empty reaction removes it.
@@ -542,6 +550,15 @@ pub struct ReactionProto {
     #[prost(string, tag = "2")]
     pub emoji: ::prost::alloc::string::String,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PollOptionProto {
+    #[prost(string, tag = "1")]
+    pub text: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub votes: u32,
+    #[prost(bool, tag = "3")]
+    pub selected: bool,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum MessageKind {
@@ -551,6 +568,9 @@ pub enum MessageKind {
     Audio = 3,
     Document = 4,
     Unknown = 5,
+    Poll = 6,
+    /// shared contact card(s); text is "\[CONTACT\] Name\[, Name…\]"
+    Contact = 7,
 }
 impl MessageKind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -565,6 +585,8 @@ impl MessageKind {
             Self::Audio => "AUDIO",
             Self::Document => "DOCUMENT",
             Self::Unknown => "UNKNOWN",
+            Self::Poll => "POLL",
+            Self::Contact => "CONTACT",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -576,6 +598,8 @@ impl MessageKind {
             "AUDIO" => Some(Self::Audio),
             "DOCUMENT" => Some(Self::Document),
             "UNKNOWN" => Some(Self::Unknown),
+            "POLL" => Some(Self::Poll),
+            "CONTACT" => Some(Self::Contact),
             _ => None,
         }
     }

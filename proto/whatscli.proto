@@ -340,6 +340,7 @@ enum MessageKind {
   DOCUMENT = 4;
   UNKNOWN = 5;
   POLL = 6;
+  CONTACT = 7; // shared contact card(s); text is "[CONTACT] Name[, Name…]"
 }
 
 // Send/delivery state of an outgoing message (WhatsApp tick marks).

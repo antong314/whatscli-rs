@@ -43,6 +43,27 @@ make run-tui       # terminal 2
 
 The backend listens on a Unix socket at `$XDG_RUNTIME_DIR/whatscli/whatscli.sock` (falls back to `$TMPDIR/whatscli/whatscli.sock`). On first run, scan the QR code with WhatsApp on your phone.
 
+## Re-fetching chat history from the phone
+
+`whatscli-server` has a one-shot backfill mode that asks your phone for older
+messages of specific chats (WhatsApp's on-demand history sync) and merges them
+into `~/Library/Application Support/whatscli/messages.json`. Messages are
+deduplicated by ID, so only missing ones (including contact cards) are added.
+
+```bash
+# 1. Quit WhatsLingo / any running whatscli-server (the command refuses to run
+#    next to one; two connections on one session conflict).
+# 2. Make sure the phone is online with WhatsApp able to run. 3. Run:
+cd backend && make build-server
+./whatscli-server --refetch-history '<jid>@g.us,<jid>@g.us' --since 2026-01-01
+```
+
+Each chat is paged backwards 50 messages at a time from its newest cached
+message until a page reaches `--since`, the phone returns nothing older, or
+`--refetch-max-pages` (200) is hit. Tunables: `--refetch-page-size`,
+`--refetch-timeout` (60s per response), `--refetch-delay` (3s between
+requests). Ctrl-C stops after saving. Restart the app afterwards.
+
 ## Layout
 
 ```

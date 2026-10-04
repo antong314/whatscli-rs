@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -665,6 +666,22 @@ func (md *MessageDatabase) GetLatestMessage(chatID string) (Message, bool) {
 	return messages[len(messages)-1], true
 }
 
+// LatestMessages returns up to n of a chat's newest cached messages, newest
+// first.
+func (md *MessageDatabase) LatestMessages(chatID string, n int) []Message {
+	md.messageLock.RLock()
+	defer md.messageLock.RUnlock()
+	messages := md.messages[chatID]
+	if n > len(messages) {
+		n = len(messages)
+	}
+	out := make([]Message, 0, n)
+	for i := len(messages) - 1; i >= 0 && len(out) < n; i-- {
+		out = append(out, messages[i])
+	}
+	return out
+}
+
 func canonicalMessageJID(id string) string {
 	if id == "" {
 		return ""
@@ -850,7 +867,7 @@ func (md *MessageDatabase) SaveChatCache() {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(config.GetChatCacheFilePath(), data, 0o644)
+	_ = writeFileAtomic(config.GetChatCacheFilePath(), data, 0o644)
 }
 
 // LoadChatCache restores chat metadata from the local cache file.
@@ -941,7 +958,36 @@ func (md *MessageDatabase) SaveMessageCache() {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(config.GetMessageCacheFilePath(), data, 0o644)
+	_ = writeFileAtomic(config.GetMessageCacheFilePath(), data, 0o644)
+}
+
+// writeFileAtomic replaces path via a temp file + rename, so a reader (or a
+// process exiting mid-save) never sees a truncated cache. Concurrent saves
+// each write their own temp file; the last rename wins.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // LoadMessageCache restores messages from the local cache file.

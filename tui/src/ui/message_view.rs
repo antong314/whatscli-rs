@@ -158,6 +158,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
             MessageKind::Video => "[VIDEO]".to_string(),
             MessageKind::Audio => format!("[AUDIO] {}", msg.text),
             MessageKind::Document => format!("[DOC: {}]", msg.file_name),
+            // Backend already renders "[CONTACT] Name[, Name…]".
+            MessageKind::Contact => msg.text.clone(),
             _ => msg.text.clone(),
         };
 

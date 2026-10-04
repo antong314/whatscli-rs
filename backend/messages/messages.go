@@ -101,6 +101,10 @@ const (
 	MessageKindDocument MessageKind = "document"
 	MessageKindUnknown  MessageKind = "unknown"
 	MessageKindPoll     MessageKind = "poll"
+	// MessageKindContact is a shared contact card (vCard). RawMessage keeps
+	// the full ContactMessage/ContactsArrayMessage so the vCard survives in
+	// the message cache; Text is a "[CONTACT] Name" display line.
+	MessageKindContact MessageKind = "contact"
 )
 
 // MessageStatus is the send/delivery state of an OUTGOING message — the

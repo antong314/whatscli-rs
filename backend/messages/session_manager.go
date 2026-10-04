@@ -98,6 +98,16 @@ type SessionManager struct {
 	// userDisconnected is set when the user explicitly disconnects, so the
 	// connection watchdog doesn't fight their intent by reconnecting.
 	userDisconnected bool
+
+	// historyMu guards the on-demand history re-fetch plumbing (see
+	// history_refetch.go): waiters for ON_DEMAND responses keyed by chat,
+	// and the channel closed once the startup cache load has finished.
+	historyMu      sync.Mutex
+	historyWaiters map[uint64]*historyWaiter
+	historyNextID  uint64
+	historyReady   chan struct{}
+	// historyRequestFn replaces the WhatsApp request in tests.
+	historyRequestFn func(chatID string, anchor historyAnchor, count int) error
 }
 
 // avatarEntry is one cached profile-picture lookup. err is non-nil for
@@ -588,6 +598,7 @@ func (sm *SessionManager) loadRecentChats() {
 	sm.syncAppState()
 	trace("app state synced")
 	sm.uiHandler.SetChats(sm.db.GetChatIds())
+	sm.markHistoryReady()
 
 	// Diagnostic hook: WHATSCLI_UNREAD_PROBE=<jid>[,<jid>…] requests an
 	// on-demand history sync for those chats after connect, to test whether
@@ -2535,6 +2546,7 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 		}
 	}
 
+	onDemandNotified := map[uint64]bool{}
 	for _, conv := range evt.Data.GetConversations() {
 		chatID := conv.GetID()
 		if chatID == "" {
@@ -2580,6 +2592,7 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 		})
 
 		var standaloneReactions []messageReactionUpdate
+		page := historyPage{ChatID: chatID}
 		for _, histMsg := range conv.GetMessages() {
 			webMsg := histMsg.GetMessage()
 			if webMsg == nil {
@@ -2590,6 +2603,7 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 				fmt.Fprintf(os.Stdout, "[history-sync] message parse failed payload=%s error=%q\n", messagePayloadNames(webMsg.GetMessage()), err)
 				continue
 			}
+			page.observe(parsed.Info)
 			if update, isReaction := eh.reactionUpdateFromEvent(parsed); isReaction {
 				if update.targetID != "" && update.senderID != "" {
 					standaloneReactions = append(standaloneReactions, update)
@@ -2611,6 +2625,7 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			}
 			if eh.sm.db.AddMessage(msg, false) {
 				addedMessages++
+				page.Added++
 			}
 			reactions := eh.historyReactions(webMsg.GetReactions(), chatJID)
 			reactionCount += len(reactions)
@@ -2640,6 +2655,9 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			if n, usable := usableOnDemandUnreadCount(int(conv.GetUnreadCount()), conv.GetMarkedAsUnread()); usable {
 				eh.sm.db.UpdateChatUnread(chatID, n)
 			}
+			// Wake a RefetchHistory waiting on this chat. The raw ID is
+			// passed too in case it is a LID the store could not resolve.
+			eh.sm.publishHistoryPage(page, onDemandNotified, chatID, conv.GetID(), conv.GetNewJID())
 		} else {
 			// Pairing-time history sync: authoritative snapshot, apply exactly.
 			eh.sm.db.UpdateChatUnread(chatID, int(conv.GetUnreadCount()))
@@ -2647,6 +2665,10 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 				eh.sm.db.SetChatUnreadCount(chatID, 1)
 			}
 		}
+	}
+
+	if evt.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
+		eh.sm.publishHistoryMisses(onDemandNotified)
 	}
 
 	currentAfter := eh.sm.getMessages(currentReceiver)
@@ -2869,6 +2891,12 @@ func (eh *eventHandler) messageFromInfo(info types.MessageInfo, raw *waProto.Mes
 		msg.Text = mediaDisplayText(MessageKindDocument, doc.GetFileName(), doc.GetCaption())
 		msg.Forwarded = doc.GetContextInfo().GetIsForwarded()
 		return msg, true
+	case raw.GetContactMessage() != nil || raw.GetContactsArrayMessage() != nil:
+		// Shared contact cards. The vCard itself stays in RawMessage (and so
+		// in the cache's base64 raw proto); Text is only the display line.
+		msg.Kind = MessageKindContact
+		msg.Text, msg.Forwarded = contactCardDisplay(raw)
+		return msg, true
 	case pollCreationFromMessage(raw) != nil:
 		poll := pollCreationFromMessage(raw)
 		msg.Kind = MessageKindPoll
@@ -2880,6 +2908,60 @@ func (eh *eventHandler) messageFromInfo(info types.MessageInfo, raw *waProto.Mes
 	default:
 		return Message{}, false
 	}
+}
+
+// contactCardDisplay renders a single or multi-contact card as
+// "[CONTACT] Name[, Name…]" and reports whether it was forwarded. Display
+// names fall back to the vCard's FN line, then to the array's own label.
+func contactCardDisplay(raw *waProto.Message) (string, bool) {
+	var names []string
+	addName := func(contact *waProto.ContactMessage) {
+		if contact == nil {
+			return
+		}
+		name := strings.TrimSpace(contact.GetDisplayName())
+		if name == "" {
+			name = vcardFullName(contact.GetVcard())
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	forwarded := false
+	if single := raw.GetContactMessage(); single != nil {
+		addName(single)
+		forwarded = single.GetContextInfo().GetIsForwarded()
+	} else if array := raw.GetContactsArrayMessage(); array != nil {
+		for _, contact := range array.GetContacts() {
+			addName(contact)
+		}
+		if len(names) == 0 {
+			if label := strings.TrimSpace(array.GetDisplayName()); label != "" {
+				names = append(names, label)
+			}
+		}
+		forwarded = array.GetContextInfo().GetIsForwarded()
+	}
+	if len(names) == 0 {
+		return "[CONTACT]", forwarded
+	}
+	return "[CONTACT] " + strings.Join(names, ", "), forwarded
+}
+
+// vcardFullName extracts the FN (formatted name) property from a vCard,
+// tolerating parameters ("FN;CHARSET=UTF-8:") and CRLF line endings.
+func vcardFullName(vcard string) string {
+	for _, line := range strings.Split(vcard, "\n") {
+		line = strings.TrimSpace(line)
+		upper := strings.ToUpper(line)
+		if !strings.HasPrefix(upper, "FN:") && !strings.HasPrefix(upper, "FN;") {
+			continue
+		}
+		if idx := strings.Index(line, ":"); idx >= 0 {
+			return strings.TrimSpace(line[idx+1:])
+		}
+	}
+	return ""
 }
 
 func pollCreationFromMessage(raw *waProto.Message) *waProto.PollCreationMessage {

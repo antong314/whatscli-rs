@@ -94,3 +94,14 @@ func TestMediaLogTokenMatchesClientDiagnostics(t *testing.T) {
 		t.Fatalf("mediaLogToken() = %q, want %q", got, want)
 	}
 }
+
+func TestMessageToProtoMapsContactCards(t *testing.T) {
+	msg := messageToProto(messages.Message{
+		Id:   "contact-id",
+		Kind: messages.MessageKindContact,
+		Text: "[CONTACT] Jane Doe",
+	})
+	if msg.Kind != pb.MessageKind_CONTACT || msg.Text != "[CONTACT] Jane Doe" {
+		t.Fatalf("contact card mapped to kind=%v text=%q", msg.Kind, msg.Text)
+	}
+}

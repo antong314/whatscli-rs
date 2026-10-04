@@ -377,6 +377,8 @@ func messageKindToProto(k messages.MessageKind) pb.MessageKind {
 		return pb.MessageKind_DOCUMENT
 	case messages.MessageKindPoll:
 		return pb.MessageKind_POLL
+	case messages.MessageKindContact:
+		return pb.MessageKind_CONTACT
 	default:
 		return pb.MessageKind_UNKNOWN
 	}

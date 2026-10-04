@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/antong314/whatscli-rs/backend/config"
 	"github.com/antong314/whatscli-rs/backend/messages"
@@ -51,7 +53,21 @@ func cleanup() {
 }
 
 func main() {
+	var refetch refetchFlags
+	flag.StringVar(&refetch.chats, "refetch-history", "",
+		"one-shot mode: comma-separated chat JIDs whose history to re-fetch from the phone, then exit (quit the app first)")
+	flag.StringVar(&refetch.since, "since", "",
+		"with --refetch-history: stop paging a chat once messages older than this date (YYYY-MM-DD) are reached")
+	flag.IntVar(&refetch.pageSize, "refetch-page-size", 50, "with --refetch-history: messages requested per on-demand request")
+	flag.DurationVar(&refetch.timeout, "refetch-timeout", 60*time.Second, "with --refetch-history: wait per on-demand response")
+	flag.DurationVar(&refetch.delay, "refetch-delay", 3*time.Second, "with --refetch-history: pause between requests")
+	flag.IntVar(&refetch.maxPages, "refetch-max-pages", 200, "with --refetch-history: safety cap on requests per chat")
+	flag.Parse()
+
 	config.InitConfig()
+	if refetch.chats != "" {
+		os.Exit(runRefetch(refetch))
+	}
 	translate.SuppressStderr()
 	// Must happen before any timers matter — see appnap_darwin.go.
 	disableAppNap()

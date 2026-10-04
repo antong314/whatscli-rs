@@ -461,3 +461,111 @@ func TestDecideAutoTranslateOutgoing_OutgoingOnly_DoesNotTranslate(t *testing.T)
 		t.Errorf("thread with no incoming messages must NOT auto-translate; got true")
 	}
 }
+
+const testVCard = "BEGIN:VCARD\r\nVERSION:3.0\r\nN:Doe;Jane;;;\r\nFN:Jane Doe\r\nTEL;type=CELL;waid=16505550100:+1 650-555-0100\r\nEND:VCARD"
+
+func TestContactMessageIsStoredWithVCard(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	eh := &eventHandler{sm: &SessionManager{db: db}}
+	raw := &waProto.Message{ContactMessage: &waProto.ContactMessage{
+		DisplayName: proto.String("Jane Doe (plumber)"),
+		Vcard:       proto.String(testVCard),
+		ContextInfo: &waProto.ContextInfo{IsForwarded: proto.Bool(true)},
+	}}
+	msg, ok := eh.messageFromInfo(types.MessageInfo{
+		MessageSource: types.MessageSource{
+			Chat:    types.NewJID("120363203127855640", types.GroupServer),
+			Sender:  types.NewJID("15551234567", types.DefaultUserServer),
+			IsGroup: true,
+		},
+		ID: "contact-id",
+	}, raw)
+	if !ok {
+		t.Fatal("contact card must not be dropped")
+	}
+	if msg.Kind != MessageKindContact || msg.Text != "[CONTACT] Jane Doe (plumber)" || !msg.Forwarded {
+		t.Fatalf("unexpected contact normalization: kind=%q text=%q forwarded=%t", msg.Kind, msg.Text, msg.Forwarded)
+	}
+	if msg.RawMessage.GetContactMessage().GetVcard() != testVCard {
+		t.Fatal("the full vCard must stay in RawMessage so it reaches the cache")
+	}
+	if translatableMessageText(msg) != "" {
+		t.Fatal("a contact card label is not language and must not be translated")
+	}
+}
+
+func TestContactsArrayMessageJoinsNamesAndFallsBackToVCard(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	eh := &eventHandler{sm: &SessionManager{db: db}}
+	msg, ok := eh.messageFromInfo(types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: types.NewJID("15551234567", types.DefaultUserServer)},
+		ID:            "contacts-array-id",
+	}, &waProto.Message{ContactsArrayMessage: &waProto.ContactsArrayMessage{
+		DisplayName: proto.String("2 contacts"),
+		Contacts: []*waProto.ContactMessage{
+			{DisplayName: proto.String("Bob Builder")},
+			{Vcard: proto.String(testVCard)}, // no display name: use FN
+		},
+		ContextInfo: &waProto.ContextInfo{IsForwarded: proto.Bool(true)},
+	}})
+	if !ok || msg.Kind != MessageKindContact {
+		t.Fatalf("contacts array was not normalized: %#v", msg)
+	}
+	if msg.Text != "[CONTACT] Bob Builder, Jane Doe" || !msg.Forwarded {
+		t.Fatalf("unexpected contacts array text=%q forwarded=%t", msg.Text, msg.Forwarded)
+	}
+
+	msg, ok = eh.messageFromInfo(types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: types.NewJID("15551234567", types.DefaultUserServer)},
+		ID:            "contacts-array-unnamed",
+	}, &waProto.Message{ContactsArrayMessage: &waProto.ContactsArrayMessage{
+		DisplayName: proto.String("2 contacts"),
+		Contacts:    []*waProto.ContactMessage{{}, {}},
+	}})
+	if !ok || msg.Text != "[CONTACT] 2 contacts" || msg.Forwarded {
+		t.Fatalf("unnamed contacts array should use the array label, got text=%q forwarded=%t", msg.Text, msg.Forwarded)
+	}
+}
+
+func TestVCardFullNameHandlesParameters(t *testing.T) {
+	if got := vcardFullName("BEGIN:VCARD\nfn;CHARSET=UTF-8:José Pérez\nEND:VCARD"); got != "José Pérez" {
+		t.Fatalf("expected FN with parameters to parse, got %q", got)
+	}
+	if got := vcardFullName("BEGIN:VCARD\nN:Doe;Jane\nEND:VCARD"); got != "" {
+		t.Fatalf("vCard without FN should yield empty name, got %q", got)
+	}
+}
+
+func TestContactCardSurvivesMessageCacheRoundTrip(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	db.AddMessage(Message{
+		Id:        "contact-roundtrip",
+		ChatId:    "120363203127855640@g.us",
+		Timestamp: 1_767_300_000,
+		Kind:      MessageKindContact,
+		Text:      "[CONTACT] Jane Doe",
+		Forwarded: true,
+		RawMessage: &waProto.Message{ContactMessage: &waProto.ContactMessage{
+			DisplayName: proto.String("Jane Doe"),
+			Vcard:       proto.String(testVCard),
+		}},
+	}, false)
+	db.SaveMessageCache() // TestMain points this at a temp dir
+
+	loaded := &MessageDatabase{}
+	loaded.Init()
+	loaded.LoadMessageCache()
+	msg, ok := loaded.GetMessage("contact-roundtrip")
+	if !ok {
+		t.Fatal("contact card missing after cache reload")
+	}
+	if msg.Kind != MessageKindContact || msg.Text != "[CONTACT] Jane Doe" || !msg.Forwarded {
+		t.Fatalf("contact metadata lost in cache: %#v", msg)
+	}
+	if msg.RawMessage.GetContactMessage().GetVcard() != testVCard {
+		t.Fatal("vCard lost in cache round trip")
+	}
+}

@@ -31,6 +31,7 @@ const (
 	MessageKind_DOCUMENT MessageKind = 4
 	MessageKind_UNKNOWN  MessageKind = 5
 	MessageKind_POLL     MessageKind = 6
+	MessageKind_CONTACT  MessageKind = 7 // shared contact card(s); text is "[CONTACT] Name[, Name…]"
 )
 
 // Enum value maps for MessageKind.
@@ -43,6 +44,7 @@ var (
 		4: "DOCUMENT",
 		5: "UNKNOWN",
 		6: "POLL",
+		7: "CONTACT",
 	}
 	MessageKind_value = map[string]int32{
 		"TEXT":     0,
@@ -52,6 +54,7 @@ var (
 		"DOCUMENT": 4,
 		"UNKNOWN":  5,
 		"POLL":     6,
+		"CONTACT":  7,
 	}
 )
 
@@ -3843,7 +3846,7 @@ const file_whatscli_proto_rawDesc = "" +
 	"\x0fPollOptionProto\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12\x14\n" +
 	"\x05votes\x18\x02 \x01(\rR\x05votes\x12\x1a\n" +
-	"\bselected\x18\x03 \x01(\bR\bselected*]\n" +
+	"\bselected\x18\x03 \x01(\bR\bselected*j\n" +
 	"\vMessageKind\x12\b\n" +
 	"\x04TEXT\x10\x00\x12\t\n" +
 	"\x05IMAGE\x10\x01\x12\t\n" +
@@ -3851,7 +3854,8 @@ const file_whatscli_proto_rawDesc = "" +
 	"\x05AUDIO\x10\x03\x12\f\n" +
 	"\bDOCUMENT\x10\x04\x12\v\n" +
 	"\aUNKNOWN\x10\x05\x12\b\n" +
-	"\x04POLL\x10\x06*\x97\x01\n" +
+	"\x04POLL\x10\x06\x12\v\n" +
+	"\aCONTACT\x10\a*\x97\x01\n" +
 	"\rMessageStatus\x12\x1a\n" +
 	"\x16MESSAGE_STATUS_UNKNOWN\x10\x00\x12\x1a\n" +
 	"\x16MESSAGE_STATUS_PENDING\x10\x01\x12\x17\n" +
