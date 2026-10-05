@@ -84,12 +84,27 @@ func (t *Translator) Translate(text, sourceLangCode, targetLangCode string) (str
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	result, err := t.ctx.Generate(prompt, llama.WithMaxTokens(512))
+	options := []llama.GenerateOption{
+		llama.WithMaxTokens(512),
+		// Translation is not a creative-writing task. Greedy decoding keeps
+		// identical messages stable and, more importantly, avoids the model
+		// occasionally volunteering several equally valid alternatives.
+		llama.WithTemperature(0),
+	}
+	if isSingleLine(text) {
+		// A one-line WhatsApp message must produce one line. TranslateGemma
+		// sometimes follows a valid translation with newline-separated
+		// variants; stop generation before a second variant can escape into
+		// an outbound message.
+		options = append(options, llama.WithStopWords("\n", "\r"))
+	}
+
+	result, err := t.ctx.Generate(prompt, options...)
 	if err != nil {
 		return "", fmt.Errorf("inference: %w", err)
 	}
 
-	return strings.TrimSpace(result), nil
+	return cleanTranslationOutput(text, result), nil
 }
 
 // TranslateToEnglish is a convenience wrapper for translating to English.
@@ -126,7 +141,8 @@ func buildPrompt(text, srcCode, tgtCode, dialect string) string {
 
 	body := fmt.Sprintf(
 		"You are a professional %s (%s) to %s (%s) translator.\n%s"+
-			"Produce only the %s translation, without any additional explanations or commentary. "+
+			"Produce exactly one best %s translation, without alternatives, variants, lists, "+
+			"the source text, explanations, or commentary. Preserve the source's line and paragraph structure. "+
 			"Please translate the following %s text into %s:\n\n\n%s",
 		srcName, srcCode, tgtName, tgtCode,
 		extra,
@@ -134,6 +150,25 @@ func buildPrompt(text, srcCode, tgtCode, dialect string) string {
 		strings.TrimSpace(text),
 	)
 	return "<start_of_turn>user\n" + body + "<end_of_turn>\n<start_of_turn>model\n"
+}
+
+func isSingleLine(text string) bool {
+	return !strings.ContainsAny(strings.TrimSpace(text), "\r\n")
+}
+
+// cleanTranslationOutput is a final defense at the trust boundary between the
+// model and WhatsApp. Generation already stops at a newline for a one-line
+// source, but keeping the same rule here protects callers if a model/backend
+// ever returns a stop sequence as part of its output.
+func cleanTranslationOutput(source, output string) string {
+	output = strings.TrimSpace(output)
+	if !isSingleLine(source) {
+		return output
+	}
+	if end := strings.IndexAny(output, "\r\n"); end >= 0 {
+		output = output[:end]
+	}
+	return strings.TrimSpace(output)
 }
 
 // resolveDialect upgrades a bare ISO code to the configured dialect when the
