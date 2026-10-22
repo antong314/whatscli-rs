@@ -388,3 +388,60 @@ func TestPruneStaleUnread(t *testing.T) {
 		t.Errorf("expected active chat counter kept, got %d", got)
 	}
 }
+
+func chatName(db *MessageDatabase, id string) string {
+	db.chatLock.RLock()
+	defer db.chatLock.RUnlock()
+	return db.chats[id].Name
+}
+
+func TestRepairChatNamesPrefersSavedContactAndClearsOwnName(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	saved := "50688717934@s.whatsapp.net"
+	unsaved := "50685834946@s.whatsapp.net"
+	namedAnton := "15550000000@s.whatsapp.net"
+	self := "16467338252@s.whatsapp.net"
+	for _, id := range []string{saved, unsaved, namedAnton, self} {
+		db.AddChat(Chat{Id: id, Name: "Anton"})
+	}
+	// Learned from our own cached outgoing message by older builds.
+	db.AddContact(Contact{Id: unsaved, Name: "Anton", Short: "Anton"})
+	db.AddSavedContact(Contact{Id: saved, Name: "Jose Andrey Topographer ESM", Short: "Jose Andrey"})
+	db.AddSavedContact(Contact{Id: namedAnton, Name: "Anton"})
+
+	if !db.RepairChatNames(self, "Anton") {
+		t.Fatal("expected repair to report changes")
+	}
+	if got := chatName(db, saved); got != "Jose Andrey Topographer ESM" {
+		t.Fatalf("saved contact chat: got %q", got)
+	}
+	if got := chatName(db, unsaved); got != "50685834946" {
+		t.Fatalf("unsaved chat should fall back to number, got %q", got)
+	}
+	if got := db.GetIdName(unsaved); got != "50685834946" {
+		t.Fatalf("poisoned contact label should be cleared, got %q", got)
+	}
+	if got := chatName(db, namedAnton); got != "Anton" {
+		t.Fatalf("address-book contact really named Anton must stay, got %q", got)
+	}
+	if got := chatName(db, self); got != "Anton" {
+		t.Fatalf("self chat must keep our name, got %q", got)
+	}
+}
+
+func TestDirectChatTitleUpgradesFromIncomingNameOnly(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	chatID := "50688717934@s.whatsapp.net"
+	db.AddMessage(Message{Id: "m1", ChatId: chatID, ContactId: chatID, ContactName: "50688717934", FromMe: true, Timestamp: 1}, false)
+	db.AddMessage(Message{Id: "m2", ChatId: chatID, ContactId: chatID, ContactName: "Anton", FromMe: true, Timestamp: 2}, false)
+	if got := chatName(db, chatID); got != "50688717934" {
+		t.Fatalf("outgoing message must not relabel the chat, got %q", got)
+	}
+
+	db.AddMessage(Message{Id: "m3", ChatId: chatID, ContactId: chatID, ContactName: "Jose Andrey", Timestamp: 3}, false)
+	if got := chatName(db, chatID); got != "Jose Andrey" {
+		t.Fatalf("incoming name should replace a phone-number title, got %q", got)
+	}
+}

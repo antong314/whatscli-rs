@@ -738,7 +738,11 @@ func (sm *SessionManager) loadContacts() {
 			Name:  name,
 			Short: short,
 		}
-		sm.db.AddContact(c)
+		if contact.FullName != "" || contact.FirstName != "" {
+			sm.db.AddSavedContact(c)
+		} else {
+			sm.db.AddContact(c)
+		}
 		contactsByPN[jid.User] = c
 		contactCount++
 	}
@@ -753,11 +757,16 @@ func (sm *SessionManager) loadContacts() {
 					var lid, pn string
 					if rows.Scan(&lid, &pn) == nil {
 						if c, ok := contactsByPN[pn]; ok {
-							sm.db.AddContact(Contact{
+							lidContact := Contact{
 								Id:    lid + "@lid",
 								Name:  c.Name,
 								Short: c.Short,
-							})
+							}
+							if saved := contacts[types.NewJID(pn, types.DefaultUserServer)]; saved.FullName != "" || saved.FirstName != "" {
+								sm.db.AddSavedContact(lidContact)
+							} else {
+								sm.db.AddContact(lidContact)
+							}
 						}
 					}
 				}
@@ -766,9 +775,26 @@ func (sm *SessionManager) loadContacts() {
 		}
 	}
 
+	if sm.db.RepairChatNames(sm.selfIdentity()) {
+		sm.db.SaveChatCache()
+	}
+
 	if contactCount > 0 {
 		sm.uiHandler.PrintText(fmt.Sprintf("Loaded %d contacts", contactCount))
 	}
+}
+
+// selfIdentity returns our own canonical JID and push name, used to spot
+// chats that were mislabelled with our own name.
+func (sm *SessionManager) selfIdentity() (string, string) {
+	if sm.client == nil || sm.client.Store == nil {
+		return "", ""
+	}
+	selfID := ""
+	if sm.client.Store.ID != nil {
+		selfID = sm.client.Store.ID.ToNonAD().String()
+	}
+	return selfID, sm.client.Store.PushName
 }
 
 func (sm *SessionManager) getChatName(jid types.JID) string {
@@ -2104,6 +2130,8 @@ func (eh *eventHandler) Handle(evt interface{}) {
 		eh.sm.db.SetChatArchived(v.JID.String(), v.Action.GetArchived())
 		eh.sm.uiHandler.SetChats(eh.sm.db.GetChatIds())
 		eh.sm.db.SaveChatCache()
+	case *events.Contact:
+		eh.handleContactUpdate(v)
 	case *events.Pin:
 		eh.sm.db.SetChatPinned(v.JID.String(), v.Action.GetPinned())
 		eh.sm.uiHandler.SetChats(eh.sm.db.GetChatIds())
@@ -2130,6 +2158,41 @@ func (eh *eventHandler) Handle(evt interface{}) {
 		eh.sm.uiHandler.SetChats(eh.sm.db.GetChatIds())
 		eh.sm.db.SaveChatCache()
 		eh.sm.db.SaveMessageCache()
+	}
+}
+
+// handleContactUpdate applies an address-book change from app-state sync
+// (contact saved or renamed on the phone) while the backend is running.
+// Without it, a newly saved contact only showed up after a restart, and
+// never replaced an existing chat's title.
+func (eh *eventHandler) handleContactUpdate(evt *events.Contact) {
+	if evt.Action == nil {
+		return
+	}
+	name := strings.TrimSpace(evt.Action.GetFullName())
+	if name == "" {
+		name = strings.TrimSpace(evt.Action.GetFirstName())
+	}
+	if name == "" {
+		return
+	}
+
+	jids := []types.JID{evt.JID}
+	for _, alt := range []string{evt.Action.GetPnJID(), evt.Action.GetLidJID()} {
+		if jid, err := types.ParseJID(alt); err == nil && !jid.IsEmpty() {
+			jids = append(jids, jid)
+		}
+	}
+	ids := make(map[string]bool, len(jids)*2)
+	for _, jid := range jids {
+		ids[jid.ToNonAD().String()] = true
+		ids[eh.resolveLID(jid).String()] = true
+	}
+	for id := range ids {
+		eh.sm.db.AddSavedContact(Contact{Id: id, Name: name})
+	}
+	if eh.sm.db.RepairChatNames(eh.sm.selfIdentity()) {
+		eh.sm.scheduleChatRefresh()
 	}
 }
 
@@ -3081,7 +3144,9 @@ func (eh *eventHandler) contactForMessage(info types.MessageInfo) (string, strin
 	// saved contact name when one exists, but replace bare phone/JID fallbacks
 	// with the sender-provided name. ParseWebMessage fills this for history as
 	// well as live events.
-	if pushName := usablePushName(info.PushName); pushName != "" {
+	// In a 1:1 chat our own outgoing message carries *our* push name, not
+	// the partner's; using it labelled the chat with our own name.
+	if pushName := usablePushName(info.PushName); pushName != "" && (info.IsGroup || !info.IsFromMe) {
 		if isFallbackContactLabel(name, contactID) {
 			name = pushName
 		}

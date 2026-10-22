@@ -19,10 +19,13 @@ import (
 
 // MessageDatabase stores messages and contact data.
 type MessageDatabase struct {
-	messages       map[string][]Message
-	messagesById   map[string]Message
-	chats          map[string]Chat
-	contacts       map[string]Contact
+	messages     map[string][]Message
+	messagesById map[string]Message
+	chats        map[string]Chat
+	contacts     map[string]Contact
+	// savedContacts marks contact IDs whose names come from the phone's
+	// address book (whatsmeow store / contact app-state actions).
+	savedContacts  map[string]bool
 	translations   map[string]string
 	transcriptions map[string]string
 
@@ -39,6 +42,7 @@ func (md *MessageDatabase) Init() {
 	md.messagesById = make(map[string]Message)
 	md.chats = make(map[string]Chat)
 	md.contacts = make(map[string]Contact)
+	md.savedContacts = make(map[string]bool)
 	md.translations = make(map[string]string)
 	md.transcriptions = make(map[string]string)
 }
@@ -231,7 +235,10 @@ func (md *MessageDatabase) updateChatFromMessageLocked(msg Message, markUnread b
 			Name:    msg.ContactName,
 		}
 	}
-	if chat.Name == "" {
+	// In a 1:1 chat the message's contact is the chat partner, so a real name
+	// may replace a phone-number title. Our own outgoing messages never
+	// carry a trustworthy partner label.
+	if chat.Name == "" || (!chat.IsGroup && !msg.FromMe && shouldUpgradeContactLabel(chat.Name, msg.ContactName, msg.ChatId)) {
 		chat.Name = msg.ContactName
 	}
 	if int64(msg.Timestamp) > chat.LastMessage {
@@ -242,7 +249,7 @@ func (md *MessageDatabase) updateChatFromMessageLocked(msg Message, markUnread b
 	}
 	md.chats[msg.ChatId] = chat
 
-	if msg.ContactId != "" {
+	if msg.ContactId != "" && (chat.IsGroup || !msg.FromMe) {
 		md.contactLock.Lock()
 		if existing, ok := md.contacts[msg.ContactId]; !ok {
 			md.contacts[msg.ContactId] = Contact{
@@ -593,6 +600,77 @@ func (md *MessageDatabase) AddContact(contact Contact) {
 		}
 	}
 	md.contacts[contact.Id] = contact
+}
+
+// AddSavedContact records an address-book contact. Its name is authoritative
+// for the matching 1:1 chat title (see RepairChatNames).
+func (md *MessageDatabase) AddSavedContact(contact Contact) {
+	md.AddContact(contact)
+	md.contactLock.Lock()
+	md.savedContacts[canonicalMessageJID(contact.Id)] = true
+	md.contactLock.Unlock()
+}
+
+// RepairChatNames re-derives 1:1 chat titles from the contact table and
+// reports whether any chat or contact changed. Chat titles used to be set
+// only once, so a contact saved after the chat first appeared never
+// replaced the phone-number title. Older builds also labelled a 1:1 chat
+// with our own push name (selfName) when the first message seen was
+// outgoing; such labels are cleared unless the address book itself uses
+// that name.
+func (md *MessageDatabase) RepairChatNames(selfID, selfName string) bool {
+	selfID = canonicalMessageJID(selfID)
+	selfName = strings.TrimSpace(selfName)
+
+	md.chatLock.Lock()
+	defer md.chatLock.Unlock()
+	md.contactLock.Lock()
+	defer md.contactLock.Unlock()
+
+	changed := false
+	for id, chat := range md.chats {
+		if chat.IsGroup || strings.HasSuffix(id, GROUPSUFFIX) || id == selfID {
+			continue
+		}
+		saved := md.savedContacts[id]
+		isSelfLabel := func(label string) bool {
+			return selfName != "" && !saved && strings.TrimSpace(label) == selfName
+		}
+
+		contact, hasContact := md.contacts[id]
+		if hasContact {
+			repaired := contact
+			if isSelfLabel(repaired.Name) {
+				repaired.Name = ""
+			}
+			if isSelfLabel(repaired.Short) {
+				repaired.Short = ""
+			}
+			if repaired != contact {
+				md.contacts[id] = repaired
+				contact = repaired
+				changed = true
+			}
+		}
+
+		name := chat.Name
+		switch {
+		case hasContact && !isFallbackContactLabel(contact.Name, id):
+			name = contact.Name
+		case isSelfLabel(name):
+			if hasContact && !isFallbackContactLabel(contact.Short, id) {
+				name = contact.Short
+			} else {
+				name = strings.TrimSuffix(id, CONTACTSUFFIX)
+			}
+		}
+		if name != chat.Name {
+			chat.Name = name
+			md.chats[id] = chat
+			changed = true
+		}
+	}
+	return changed
 }
 
 // GetChatIds returns chats sorted by most recent message first.

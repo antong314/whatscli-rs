@@ -6,6 +6,7 @@ import (
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waSyncAction"
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -567,5 +568,43 @@ func TestContactCardSurvivesMessageCacheRoundTrip(t *testing.T) {
 	}
 	if msg.RawMessage.GetContactMessage().GetVcard() != testVCard {
 		t.Fatal("vCard lost in cache round trip")
+	}
+}
+
+func TestContactForMessageIgnoresOwnPushNameInDirectChat(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	eh := &eventHandler{sm: &SessionManager{db: db}}
+
+	_, name, _ := eh.contactForMessage(types.MessageInfo{
+		MessageSource: types.MessageSource{
+			Chat:     types.NewJID("50688717934", types.DefaultUserServer),
+			IsFromMe: true,
+		},
+		PushName: "Anton",
+	})
+
+	if name == "Anton" {
+		t.Fatal("our own push name must not label a 1:1 chat partner")
+	}
+}
+
+func TestContactUpdateRenamesExistingChat(t *testing.T) {
+	db := &MessageDatabase{}
+	db.Init()
+	chatID := "50688717934@s.whatsapp.net"
+	db.AddChat(Chat{Id: chatID, Name: "50688717934"})
+	eh := &eventHandler{sm: &SessionManager{db: db}}
+
+	eh.handleContactUpdate(&events.Contact{
+		JID:    types.NewJID("50688717934", types.DefaultUserServer),
+		Action: &waSyncAction.ContactAction{FullName: proto.String("Jose Andrey Topographer ESM")},
+	})
+
+	if got := db.GetIdName(chatID); got != "Jose Andrey Topographer ESM" {
+		t.Fatalf("expected saved contact name, got %q", got)
+	}
+	if got := chatName(db, chatID); got != "Jose Andrey Topographer ESM" {
+		t.Fatalf("chat title not updated, got %q", got)
 	}
 }
