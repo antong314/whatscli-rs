@@ -8,6 +8,7 @@ backend/whatscli.exe
 backend/_llama-go
 backend/_whisper
 backend/_opus
+backend/_stubs
 
 # TUI (Rust)
 tui/target/

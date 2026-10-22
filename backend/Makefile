@@ -11,15 +11,21 @@ export CGO_ENABLED=1
 OPUS_CGO_CFLAGS := -I$(OPUS_DIR)/include
 OPUS_CGO_LDFLAGS := -L$(OPUS_DIR)/lib -lopusfile -lopus -logg -lm
 
+# llama-go links -lgomp, but our Metal/BLAS build of ggml doesn't use OpenMP.
+# Apple clang ships no libgomp, so link against an empty stub archive instead.
+STUB_DIR := $(CURDIR)/_stubs
+# Newer Apple clang no longer defaults to C++17, which llama.cpp headers need.
+export CGO_CXXFLAGS ?= -O2 -g -std=c++17
+
 build: deps
 	CGO_CFLAGS="$(OPUS_CGO_CFLAGS)" CGO_LDFLAGS="$(OPUS_CGO_LDFLAGS)" \
-	LIBRARY_PATH="$(LLAMA_DIR):$(WHISPER_LIB_DIR)" \
+	LIBRARY_PATH="$(LLAMA_DIR):$(WHISPER_LIB_DIR):$(STUB_DIR)" \
 	C_INCLUDE_PATH="$(LLAMA_DIR):$(WHISPER_DIR)/include:$(WHISPER_DIR)/ggml/include" \
 	go build -o whatscli
 
 build-server: deps
 	CGO_CFLAGS="$(OPUS_CGO_CFLAGS)" CGO_LDFLAGS="$(OPUS_CGO_LDFLAGS)" \
-	LIBRARY_PATH="$(LLAMA_DIR):$(WHISPER_LIB_DIR)" \
+	LIBRARY_PATH="$(LLAMA_DIR):$(WHISPER_LIB_DIR):$(STUB_DIR)" \
 	C_INCLUDE_PATH="$(LLAMA_DIR):$(WHISPER_DIR)/include:$(WHISPER_DIR)/ggml/include" \
 	go build -o whatscli-server ./cmd/server/
 
@@ -35,7 +41,7 @@ run-server: build-server
 
 install: deps
 	CGO_CFLAGS="$(OPUS_CGO_CFLAGS)" CGO_LDFLAGS="$(OPUS_CGO_LDFLAGS)" \
-	LIBRARY_PATH="$(LLAMA_DIR):$(WHISPER_LIB_DIR)" \
+	LIBRARY_PATH="$(LLAMA_DIR):$(WHISPER_LIB_DIR):$(STUB_DIR)" \
 	C_INCLUDE_PATH="$(LLAMA_DIR):$(WHISPER_DIR)/include:$(WHISPER_DIR)/ggml/include" \
 	go install .
 
@@ -49,7 +55,15 @@ release:
 	./release.sh
 
 # Ensure all native dependencies are built before compiling Go code.
-deps: llama whisper opus
+deps: llama whisper opus stubs
+
+# Empty libgomp.a so the linker resolves llama-go's -lgomp (see STUB_DIR).
+stubs:
+	@if [ ! -f "$(STUB_DIR)/libgomp.a" ]; then \
+		mkdir -p "$(STUB_DIR)" && \
+		echo "" | cc -x c -c - -o "$(STUB_DIR)/gomp_stub.o" && \
+		ar crs "$(STUB_DIR)/libgomp.a" "$(STUB_DIR)/gomp_stub.o"; \
+	fi
 
 # Build the llama-go native library for embedded inference.
 llama:
@@ -132,4 +146,4 @@ opus:
 		echo "libopusfile.a already exists, skipping build"; \
 	fi
 
-.PHONY: build build-server clean run run-server install get update release deps llama whisper opus
+.PHONY: build build-server clean run run-server install get update release deps llama whisper opus stubs
