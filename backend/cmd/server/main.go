@@ -47,6 +47,29 @@ func writePID() error {
 	return os.WriteFile(pidPath(), []byte(strconv.Itoa(os.Getpid())), 0600)
 }
 
+// keepPIDFile rewrites the PID file every few minutes. macOS purges files in
+// $TMPDIR that go untouched for about three days; once the PID file vanished,
+// the next app launch no longer saw this backend, spawned a second one on the
+// same WhatsApp login, and the two kicked each other offline.
+func keepPIDFile() {
+	for range time.Tick(10 * time.Minute) {
+		if err := writePID(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to refresh PID file: %v\n", err)
+		}
+	}
+}
+
+// backendAlreadyServing reports whether another backend is answering on the
+// socket, in which case starting a second one must not steal it.
+func backendAlreadyServing(sock string) bool {
+	conn, err := net.DialTimeout("unix", sock, time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 func cleanup() {
 	os.Remove(socketPath())
 	os.Remove(pidPath())
@@ -112,6 +135,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to create socket dir: %v\n", err)
 		os.Exit(1)
 	}
+	if backendAlreadyServing(sock) {
+		// Leave the running backend in charge; the app connects to the socket
+		// it is already serving.
+		fmt.Fprintf(os.Stderr, "another whatscli-server is already serving %s; exiting\n", sock)
+		os.Exit(0)
+	}
 	os.Remove(sock)
 
 	lis, err := net.Listen("unix", sock)
@@ -124,6 +153,7 @@ func main() {
 	if err := writePID(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write PID file: %v\n", err)
 	}
+	go keepPIDFile()
 
 	grpcServer := grpc.NewServer()
 	svc := server.NewWhatsCLIServer(sm, broadcast, handler)

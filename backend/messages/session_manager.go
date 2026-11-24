@@ -26,6 +26,7 @@ import (
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -212,6 +213,27 @@ func (sm *SessionManager) connectionWatchdog() {
 			sm.uiHandler.PrintError(fmt.Errorf("reconnect failed (will retry): %v", err))
 		}
 	}
+}
+
+// refreshWAVersion asks web.whatsapp.com for the current web client version
+// and makes whatsmeow advertise it. WhatsApp regularly raises the minimum
+// version it accepts and rejects older clients with a 405 "client outdated"
+// connect failure; whatsmeow then just drops the socket, so without this the
+// app silently stops receiving messages until the library is upgraded.
+// Failures are non-fatal: the version compiled into whatsmeow is kept.
+func refreshWAVersion() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	latest, err := whatsmeow.GetLatestVersion(ctx, nil)
+	if err != nil || latest == nil {
+		fmt.Fprintf(os.Stderr, "[wa-version] could not fetch latest version, keeping %s: %v\n", store.GetWAVersion(), err)
+		return
+	}
+	if current := store.GetWAVersion(); latest.LessThan(current) || *latest == current {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[wa-version] using %s (built-in %s)\n", latest, store.GetWAVersion())
+	store.SetWAVersion(*latest)
 }
 
 func (sm *SessionManager) runManager() error {
@@ -491,6 +513,8 @@ func (sm *SessionManager) loginWithConnection(client *whatsmeow.Client) error {
 		sm.StatusChannel <- StatusMsg{false, nil}
 		time.Sleep(500 * time.Millisecond)
 	}
+
+	refreshWAVersion()
 
 	if client.Store.ID == nil {
 		return sm.loginWithQRCode(client)
@@ -2126,6 +2150,17 @@ func (eh *eventHandler) Handle(evt interface{}) {
 	case *events.LoggedOut:
 		eh.sm.StatusChannel <- StatusMsg{false, nil}
 		eh.sm.uiHandler.PrintText("Logged out: " + fmt.Sprintf("%v", v.Reason))
+	case *events.ClientOutdated:
+		// WhatsApp rejected our client version. Pick up the current one so the
+		// connection watchdog's next reconnect succeeds.
+		eh.sm.StatusChannel <- StatusMsg{false, nil}
+		eh.sm.uiHandler.PrintError(errors.New("WhatsApp rejected the client version as outdated; refreshing version and reconnecting"))
+		go refreshWAVersion()
+	case *events.ConnectFailure:
+		eh.sm.uiHandler.PrintError(fmt.Errorf("WhatsApp refused the connection: %s %s", v.Reason, v.Message))
+	case *events.StreamReplaced:
+		eh.sm.StatusChannel <- StatusMsg{false, nil}
+		eh.sm.uiHandler.PrintError(errors.New("WhatsApp connection taken over by another session using the same login"))
 	case *events.Archive:
 		eh.sm.db.SetChatArchived(v.JID.String(), v.Action.GetArchived())
 		eh.sm.uiHandler.SetChats(eh.sm.db.GetChatIds())
